@@ -351,6 +351,8 @@ class VideoEditorViewModel {
 
     /// 导出 Top N 精彩片段
     func exportTopHighlights(from video: Video, count: Int) async {
+        resetErrorState()
+
         // 🔥 并发控制：如果有任务在进行，则拒绝新导出
         guard canStartNewTask else {
             errorMessage = busyStatusMessage ?? "当前有任务正在进行，请稍候"
@@ -401,6 +403,8 @@ class VideoEditorViewModel {
 
     /// 导出最长的 N 个回合
     func exportLongestHighlights(from video: Video, count: Int) async {
+        resetErrorState()
+
         // 🔥 并发控制：如果有任务在进行，则拒绝新导出
         guard canStartNewTask else {
             errorMessage = busyStatusMessage ?? "当前有任务正在进行，请稍候"
@@ -447,6 +451,8 @@ class VideoEditorViewModel {
 
     /// 导出收藏的回合
     func exportFavoriteHighlights(from video: Video) async {
+        resetErrorState()
+
         // 🔥 并发控制：如果有任务在进行，则拒绝新导出
         guard canStartNewTask else {
             errorMessage = busyStatusMessage ?? "当前有任务正在进行，请稍候"
@@ -469,6 +475,55 @@ class VideoEditorViewModel {
                 from: video,
                 highlights: favorites,
                 exportName: "favorites"
+            )
+
+            // 保存导出记录
+            for file in exportedFiles {
+                video.addExportedFile(file)
+            }
+
+            try modelContext?.save()
+            loadVideos()
+
+            currentOperation = "导出完成！"
+
+            // 保存到相册（可选）
+            await saveToPhotoLibrary(files: exportedFiles)
+
+        } catch {
+            handleError(error)
+        }
+
+        isExporting = false
+    }
+
+    /// 导出带网球标注的视频（调试用）
+    func exportWithBallAnnotations(from video: Video) async {
+        resetErrorState()
+
+        // 🔥 并发控制：如果有任务在进行，则拒绝新导出
+        guard canStartNewTask else {
+            errorMessage = busyStatusMessage ?? "当前有任务正在进行，请稍候"
+            showError = true
+            return
+        }
+
+        let highlights = video.getLongestHighlights(count: 10) // 导出最长的10个回合
+        guard !highlights.isEmpty else {
+            errorMessage = "没有检测到回合"
+            showError = true
+            return
+        }
+
+        isExporting = true
+        currentOperation = "正在导出带标注的视频..."
+
+        do {
+            // 导出带标注的视频
+            let exportedFiles = try await VideoProcessingService.shared.exportWithBallAnnotations(
+                from: video,
+                highlights: highlights,
+                exportName: "ball-annotations"
             )
 
             // 保存导出记录
@@ -536,9 +591,36 @@ class VideoEditorViewModel {
 
     /// 错误处理
     private func handleError(_ error: Error) {
-        errorMessage = error.localizedDescription
+        print("❌ 错误发生: \(error.localizedDescription)")
+        
+        // 根据错误类型提供更友好的错误消息
+        if let videoError = error as? VideoError {
+            switch videoError {
+            case .noVideoTrack:
+                errorMessage = "视频文件无效：找不到视频轨道。\n\n建议：请确认这是一个有效的视频文件。"
+            case .exportFailed:
+                errorMessage = "视频导出失败。\n\n建议：请稍后重试，或尝试重新导入视频。"
+            case .exportFailedWithReason(let reason):
+                errorMessage = "导出失败：\(reason)\n\n建议：\n• 如果提示文件不存在，请重新导入视频\n• 如果提示空间不足，请清理设备存储空间\n• 如果问题持续，请联系技术支持"
+            case .analysisFailed:
+                errorMessage = "视频分析失败。\n\n建议：请稍后重试。"
+            }
+        } else {
+            // 通用错误处理
+            let errorDesc = error.localizedDescription
+            
+            if errorDesc.contains("not found") || errorDesc.contains("不存在") {
+                errorMessage = "文件未找到。\n\n可能原因：\n• 视频文件已被删除\n• 文件路径无效\n\n建议：请重新导入视频。"
+            } else if errorDesc.contains("space") || errorDesc.contains("空间") {
+                errorMessage = "存储空间不足。\n\n建议：\n• 删除一些不需要的文件\n• 清理设备缓存\n• 导出到云存储"
+            } else if errorDesc.contains("permission") || errorDesc.contains("权限") {
+                errorMessage = "没有访问权限。\n\n建议：\n• 检查应用权限设置\n• 重启应用后重试"
+            } else {
+                errorMessage = "操作失败：\(errorDesc)\n\n建议：请稍后重试。如果问题持续，请重启应用。"
+            }
+        }
+
         showError = true
-        print("Error: \(error.localizedDescription)")
     }
 
     /// 获取处理状态文本
@@ -561,6 +643,11 @@ class VideoEditorViewModel {
         default:
             return video.analysisStatus
         }
+    }
+
+    private func resetErrorState() {
+        errorMessage = nil
+        showError = false
     }
 
     /// 获取处理状态颜色
@@ -596,12 +683,58 @@ struct MovieFile: Transferable {
         FileRepresentation(contentType: .movie) { movie in
             SentTransferredFile(movie.url)
         } importing: { received in
-            // 将接收到的文件复制到临时目录
+            print("📥 开始接收视频文件")
+            print("   源文件: \(received.file.path)")
+            
+            // 验证源文件存在
+            guard FileManager.default.fileExists(atPath: received.file.path) else {
+                print("   ❌ 错误: 源文件不存在")
+                throw VideoError.exportFailedWithReason("源文件不存在")
+            }
+            
+            // 获取文件大小
+            let fileSize = try FileManager.default.attributesOfItem(atPath: received.file.path)[.size] as? Int64 ?? 0
+            print("   文件大小: \(ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file))")
+            
+            // 将接收到的文件复制到临时目录（使用更稳定的命名）
+            let timestamp = Date().timeIntervalSince1970
+            let tempFileName = "import_\(Int(timestamp))_\(UUID().uuidString)"
             let tempURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent(UUID().uuidString)
-                .appendingPathExtension("mov")
+                .appendingPathComponent(tempFileName)
+                .appendingPathExtension(received.file.pathExtension.isEmpty ? "mov" : received.file.pathExtension)
+            
+            print("   目标临时路径: \(tempURL.path)")
 
-            try FileManager.default.copyItem(at: received.file, to: tempURL)
+            // 如果目标文件已存在，先删除
+            if FileManager.default.fileExists(atPath: tempURL.path) {
+                try? FileManager.default.removeItem(at: tempURL)
+            }
+
+            // 复制文件
+            do {
+                try FileManager.default.copyItem(at: received.file, to: tempURL)
+                print("   ✅ 文件复制成功")
+                
+                // 验证复制后的文件存在且可读
+                guard FileManager.default.fileExists(atPath: tempURL.path),
+                      FileManager.default.isReadableFile(atPath: tempURL.path) else {
+                    print("   ❌ 错误: 复制后的文件不可读")
+                    throw VideoError.exportFailedWithReason("复制后的文件不可读")
+                }
+                
+                let copiedSize = try FileManager.default.attributesOfItem(atPath: tempURL.path)[.size] as? Int64 ?? 0
+                print("   复制后文件大小: \(ByteCountFormatter.string(fromByteCount: copiedSize, countStyle: .file))")
+                
+                // 验证文件大小一致（不一致时提示，但继续流程）
+                if copiedSize != fileSize {
+                    print("   ⚠️ 警告: 文件大小不匹配 (源: \(fileSize) bytes, 复制: \(copiedSize) bytes)")
+                }
+                
+            } catch {
+                print("   ❌ 文件复制失败: \(error.localizedDescription)")
+                throw VideoError.exportFailedWithReason("文件复制失败: \(error.localizedDescription)")
+            }
+            
             return Self(url: tempURL)
         }
     }

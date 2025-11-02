@@ -1,4 +1,86 @@
+# Test videos
 *test_videos
 
 # Dev Docs System - temporary task documentation
 /docs/dev/active/
+
+# Xcode
+# User-specific files
+*.xcuserstate
+*.xcuserdatad
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+
+# Build artifacts
+build/
+DerivedData/
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.swiftpm/
+.build/
+.swift-module-cache/
+Packages/
+Package.pins
+Package.resolved
+*.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
+
+# CocoaPods (if used)
+Pods/
+Podfile.lock
+
+# Carthage (if used)
+Carthage/Build/
+Carthage/Checkouts/
+
+# fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output
+
+# Code coverage
+*.gcda
+*.gcno
+*.profdata
+*.coverage
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Thumbnails
+Thumbs.db
+
+# AppCode
+.idea/
+
+# Temporary files
+*~
+*.swp
+*.swo
+
+# Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# Provisioning profiles
+*.mobileprovision
+*.provisionprofile
+
+# Certificates
+*.cer
+*.p12
+*.certSigningRequest
+
+# Scripts (if they're temporary/local)
+Scripts/
+
+# Temporary images/screenshots
+*.png
+!zacks_tennis/Assets.xcassets/**/*.png

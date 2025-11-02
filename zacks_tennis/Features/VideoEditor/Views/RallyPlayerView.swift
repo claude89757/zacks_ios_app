@@ -31,6 +31,8 @@ struct RallyPlayerView: View {
                 TabView(selection: $currentIndex) {
                     ForEach(Array(rallies.enumerated()), id: \.element.id) { index, rally in
                         RallyPlayerCard(
+                            index: index,
+                            currentIndex: $currentIndex,
                             rally: rally,
                             video: video,
                             isPlaying: $isPlaying,
@@ -159,11 +161,16 @@ struct RallyPlayerView: View {
     // MARK: - Helper Methods
 
     private func setupInitialIndex() {
-        // 如果有选中的回合，定位到该回合
+        guard !rallies.isEmpty else { return }
+
         if let selected = selectedRally,
            let index = rallies.firstIndex(where: { $0.id == selected.id }) {
             currentIndex = index
         }
+
+        selectedRally = rallies[currentIndex]
+        playerManager.pauseAll()
+        playCurrentRally(autoStart: isPlaying)
     }
 
     private func handleIndexChange(_ newIndex: Int) {
@@ -175,21 +182,25 @@ struct RallyPlayerView: View {
         playerManager.pauseAll()
 
         // 如果需要自动播放，启动新的播放器
-        if isPlaying {
-            playCurrentRally()
-        }
+        playCurrentRally(autoStart: isPlaying)
     }
 
-    private func playCurrentRally() {
+    private func playCurrentRally(autoStart: Bool) {
         guard currentIndex >= 0 && currentIndex < rallies.count else { return }
         let rally = rallies[currentIndex]
+        selectedRally = rally
 
         // 获取视频 URL
         let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let videoURL = documentsURL.appendingPathComponent(video.originalFilePath)
 
         // 播放回合片段
-        playerManager.play(url: videoURL, startTime: rally.startTime)
+        playerManager.play(
+            url: videoURL,
+            startTime: rally.startTime,
+            endTime: rally.endTime,
+            autoStart: autoStart
+        )
     }
 
     private func toggleFavorite(_ rally: VideoHighlight) {
@@ -203,6 +214,8 @@ struct RallyPlayerView: View {
 // MARK: - Rally Player Card
 
 struct RallyPlayerCard: View {
+    let index: Int
+    @Binding var currentIndex: Int
     let rally: VideoHighlight
     let video: Video
     @Binding var isPlaying: Bool
@@ -210,6 +223,19 @@ struct RallyPlayerCard: View {
 
     @StateObject private var playerManager = VideoPlayerManager.shared
     @State private var isPlayerReady = false
+    @State private var playbackProgress: Double = 0
+    @State private var timeObserver: Any?
+    @State private var observedPlayer: AVPlayer?
+    @State private var isScrubbing = false
+    @State private var wasPlayingBeforeScrub = false
+
+    private var isActive: Bool {
+        currentIndex == index
+    }
+
+    private var shouldShowProgressBar: Bool {
+        isPlayerReady && isActive
+    }
 
     var body: some View {
         ZStack {
@@ -297,6 +323,12 @@ struct RallyPlayerCard: View {
                     .padding(.trailing, 16)
                 }
 
+                if shouldShowProgressBar {
+                    progressBar
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 24)
+                }
+
                 // 底部信息栏
                 HStack(alignment: .bottom) {
                     VStack(alignment: .leading, spacing: 8) {
@@ -362,6 +394,15 @@ struct RallyPlayerCard: View {
         .onAppear {
             loadPlayer()
         }
+        .onDisappear {
+            cleanupPlayer()
+        }
+        .onChange(of: currentIndex) { _, _ in
+            loadPlayer()
+        }
+        .onReceive(playerManager.$activePlayer) { _ in
+            loadPlayer()
+        }
     }
 
     // MARK: - Computed Properties
@@ -379,30 +420,227 @@ struct RallyPlayerCard: View {
     // MARK: - Helper Methods
 
     private func loadPlayer() {
-        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let videoURL = documentsURL.appendingPathComponent(video.originalFilePath)
+        removeTimeObserver()
 
-        let player = playerManager.getPlayer(for: videoURL)
+        guard isActive else {
+            isPlayerReady = false
+            playbackProgress = 0
+            return
+        }
 
-        // 定位到回合开始时间
-        let time = CMTime(seconds: rally.startTime, preferredTimescale: 600)
-        player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+        guard let player = playerManager.activePlayer else {
+            isPlayerReady = false
+            playbackProgress = 0
+            return
+        }
 
+        player.currentItem?.forwardPlaybackEndTime = CMTime(
+            seconds: rally.endTime,
+            preferredTimescale: 600
+        )
+
+        playbackProgress = 0
         isPlayerReady = true
+        addTimeObserver(to: player)
+        updateProgress(currentSeconds: player.currentTime().seconds)
+    }
 
-        // 自动播放
-        if isPlaying {
-            player.play()
+    private func cleanupPlayer() {
+        removeTimeObserver()
+
+        if !isActive {
+            isPlayerReady = false
+            playbackProgress = 0
+        }
+
+        isScrubbing = false
+        wasPlayingBeforeScrub = false
+    }
+
+    private func addTimeObserver(to player: AVPlayer) {
+        removeTimeObserver()
+
+        let interval = CMTime(seconds: 0.1, preferredTimescale: 600)
+        observedPlayer = player
+        timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
+            handleTimeUpdate(player: player, currentSeconds: time.seconds)
         }
     }
 
+    private func removeTimeObserver() {
+        if let token = timeObserver, let observedPlayer {
+            observedPlayer.removeTimeObserver(token)
+        }
+
+        timeObserver = nil
+        observedPlayer = nil
+    }
+
+    private func handleTimeUpdate(player: AVPlayer, currentSeconds: Double) {
+        guard isActive, !isScrubbing else { return }
+
+        updateProgress(currentSeconds: currentSeconds)
+
+        if currentSeconds >= rally.endTime - 0.05 {
+            playbackProgress = 1
+
+            if isPlaying {
+                isPlaying = false
+            }
+
+            player.pause()
+        }
+    }
+
+    private func updateProgress(currentSeconds: Double) {
+        if isScrubbing {
+            return
+        }
+
+        let start = rally.startTime
+        let end = rally.endTime
+        let duration = max(end - start, 0.01)
+        let normalized = (currentSeconds - start) / duration
+        playbackProgress = min(max(normalized, 0), 1)
+    }
+
+    private var progressBar: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.25))
+                    .frame(height: 4)
+
+                Capsule()
+                    .fill(Color.green)
+                    .frame(width: geometry.size.width * playbackProgress, height: 4)
+                
+                // 击球声标记
+                ForEach(Array(rally.audioPeakTimestamps.enumerated()), id: \.offset) { _, timestamp in
+                    let normalizedPosition = min(max(timestamp / rally.duration, 0), 1)
+                    let xPosition = geometry.size.width * normalizedPosition
+                    
+                    Rectangle()
+                        .fill(Color.yellow)
+                        .frame(width: 2, height: 8)
+                        .offset(x: xPosition, y: -2)
+                        .shadow(color: .black.opacity(0.3), radius: 1, x: 0, y: 0.5)
+                }
+
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: 12, height: 12)
+                    .shadow(color: .black.opacity(0.2), radius: 2, x: 0, y: 1)
+                    .offset(x: knobOffset(in: geometry.size.width), y: -4)
+            }
+            .contentShape(Rectangle())
+            .gesture(scrubGesture(totalWidth: geometry.size.width))
+        }
+        .frame(height: 16)
+        .animation(.easeInOut(duration: 0.15), value: playbackProgress)
+    }
+
     private func togglePlayPause() {
-        isPlaying.toggle()
+        guard isActive, let player = playerManager.activePlayer else { return }
 
         if isPlaying {
-            playerManager.activePlayer?.play()
+            player.pause()
+            isPlaying = false
+            return
+        }
+
+        player.currentItem?.forwardPlaybackEndTime = CMTime(
+            seconds: rally.endTime,
+            preferredTimescale: 600
+        )
+
+        let currentSeconds = player.currentTime().seconds
+        let startTime = CMTime(seconds: rally.startTime, preferredTimescale: 600)
+
+        if currentSeconds >= rally.endTime - 0.05 || currentSeconds < rally.startTime {
+            playbackProgress = 0
+            player.seek(to: startTime, toleranceBefore: .zero, toleranceAfter: .zero) { _ in
+                Task { @MainActor in
+                    player.play()
+                }
+            }
         } else {
-            playerManager.activePlayer?.pause()
+            player.play()
+        }
+
+        isPlaying = true
+    }
+
+    private func knobOffset(in totalWidth: CGFloat) -> CGFloat {
+        let clampedProgress = min(max(playbackProgress, 0), 1)
+        let knobWidth: CGFloat = 12
+        let xPosition = totalWidth * clampedProgress - knobWidth / 2
+        return max(-knobWidth / 2, min(totalWidth - knobWidth / 2, xPosition))
+    }
+
+    private func scrubGesture(totalWidth: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                guard isActive, let player = playerManager.activePlayer else { return }
+
+                startScrubbingIfNeeded(player: player)
+
+                let locationX = min(max(value.location.x, 0), totalWidth)
+                let progress = totalWidth > 0 ? locationX / totalWidth : 0
+                updateProgressFromScrub(progress, player: player)
+            }
+            .onEnded { _ in
+                finishScrubbing()
+            }
+    }
+
+    private func startScrubbingIfNeeded(player: AVPlayer) {
+        if !isScrubbing {
+            isScrubbing = true
+            wasPlayingBeforeScrub = isPlaying
+            player.pause()
+            player.currentItem?.forwardPlaybackEndTime = CMTime(
+                seconds: rally.endTime,
+                preferredTimescale: 600
+            )
+        }
+    }
+
+    private func updateProgressFromScrub(_ progress: Double, player: AVPlayer) {
+        let clamped = min(max(progress, 0), 1)
+        playbackProgress = clamped
+
+        let targetSeconds = rally.startTime + clamped * max(rally.endTime - rally.startTime, 0)
+        let time = CMTime(seconds: targetSeconds, preferredTimescale: 600)
+        player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    private func finishScrubbing() {
+        guard isActive, let player = playerManager.activePlayer else {
+            isScrubbing = false
+            wasPlayingBeforeScrub = false
+            return
+        }
+
+        let clamped = min(max(playbackProgress, 0), 1)
+        let targetSeconds = rally.startTime + clamped * max(rally.endTime - rally.startTime, 0)
+        let time = CMTime(seconds: targetSeconds, preferredTimescale: 600)
+
+        player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { _ in
+            Task { @MainActor in
+                isScrubbing = false
+
+                if wasPlayingBeforeScrub {
+                    player.currentItem?.forwardPlaybackEndTime = CMTime(
+                        seconds: rally.endTime,
+                        preferredTimescale: 600
+                    )
+                    player.play()
+                    isPlaying = true
+                }
+
+                wasPlayingBeforeScrub = false
+            }
         }
     }
 }

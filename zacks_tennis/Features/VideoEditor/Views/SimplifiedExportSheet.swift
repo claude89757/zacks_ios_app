@@ -10,9 +10,10 @@ import SwiftUI
 /// 简化版导出选项Sheet
 struct SimplifiedExportSheet: View {
     let video: Video
-    let viewModel: VideoEditorViewModel
+    @Bindable var viewModel: VideoEditorViewModel
 
     @Environment(\.dismiss) private var dismiss
+    @State private var showExportError = false
 
     var body: some View {
         NavigationStack {
@@ -51,6 +52,24 @@ struct SimplifiedExportSheet: View {
                 } header: {
                     Text("快捷导出")
                 }
+
+                // 调试选项
+                Section {
+                    // 选项4：导出带网球标注的视频（调试用）
+                    ExportOptionRow(
+                        title: "导出带网球标注视频",
+                        subtitle: "显示网球轨迹和检测框（调试用）",
+                        icon: "scope",
+                        color: .orange,
+                        isDisabled: video.highlights.isEmpty
+                    ) {
+                        exportWithBallAnnotations()
+                    }
+                } header: {
+                    Text("调试工具")
+                } footer: {
+                    Text("导出的视频将包含网球检测框、轨迹线和速度信息，方便调优检测参数")
+                }
             }
             .navigationTitle("导出选项")
             .navigationBarTitleDisplayMode(.inline)
@@ -62,6 +81,19 @@ struct SimplifiedExportSheet: View {
                 }
             }
         }
+        .onChange(of: viewModel.showError) { _, newValue in
+            if newValue {
+                showExportError = true
+            }
+        }
+        .alert("导出失败", isPresented: $showExportError, presenting: viewModel.errorMessage) { _ in
+            Button("确定", role: .cancel) {
+                showExportError = false
+                viewModel.showError = false
+            }
+        } message: { message in
+            Text(message)
+        }
     }
 
     // MARK: - Actions
@@ -69,7 +101,10 @@ struct SimplifiedExportSheet: View {
     private func exportLongest(_ count: Int) {
         Task {
             await viewModel.exportLongestHighlights(from: video, count: count)
-            dismiss()
+            // 只在导出成功时才关闭Sheet，让用户能看到错误提示
+            if !viewModel.showError {
+                dismiss()
+            }
         }
     }
 
@@ -77,7 +112,21 @@ struct SimplifiedExportSheet: View {
         guard !video.favoriteHighlights.isEmpty else { return }
         Task {
             await viewModel.exportFavoriteHighlights(from: video)
-            dismiss()
+            // 只在导出成功时才关闭Sheet，让用户能看到错误提示
+            if !viewModel.showError {
+                dismiss()
+            }
+        }
+    }
+
+    private func exportWithBallAnnotations() {
+        guard !video.highlights.isEmpty else { return }
+        Task {
+            await viewModel.exportWithBallAnnotations(from: video)
+            // 只在导出成功时才关闭Sheet，让用户能看到错误提示
+            if !viewModel.showError {
+                dismiss()
+            }
         }
     }
 
@@ -142,10 +191,18 @@ struct ExportOptionRow: View {
 // MARK: - Preview
 
 #Preview("简化导出选项") {
-    SimplifiedExportSheet(
-        video: createSampleVideoForPreview(),
-        viewModel: VideoEditorViewModel()
-    )
+    SimplifiedExportSheetPreview()
+}
+
+private struct SimplifiedExportSheetPreview: View {
+    @State private var viewModel = VideoEditorViewModel()
+
+    var body: some View {
+        SimplifiedExportSheet(
+            video: createSampleVideoForPreview(),
+            viewModel: viewModel
+        )
+    }
 }
 
 // MARK: - Preview Helper

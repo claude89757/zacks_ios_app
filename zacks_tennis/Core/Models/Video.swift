@@ -337,3 +337,26 @@ extension Video {
         updateAnalysisStatus("导入失败", progress: analysisProgress, stage: "导入失败: \(error)")
     }
 }
+
+// MARK: - File Name Sanitizing
+
+extension String {
+    /// Produces a safe file-name component by stripping characters that are illegal on Apple platforms.
+    func sanitizedFileComponent(fallback: String = "file") -> String {
+        let invalidCharacters = CharacterSet(charactersIn: "\\/:?%*|\"<>")
+            .union(.newlines)
+            .union(.illegalCharacters)
+            .union(.controlCharacters)
+
+        let components = self.components(separatedBy: invalidCharacters)
+        let joined = components.filter { !$0.isEmpty }.joined(separator: "_")
+        let collapsedSpaces = joined.replacingOccurrences(of: " ", with: "_")
+        let trimmed = collapsedSpaces.trimmingCharacters(in: CharacterSet(charactersIn: "._"))
+
+        if trimmed.isEmpty {
+            return fallback
+        }
+
+        return String(trimmed.prefix(80))
+    }
+}

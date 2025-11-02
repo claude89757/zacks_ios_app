@@ -25,6 +25,30 @@ protocol FrameAnalyzing: Actor {
     func reset() async
 }
 
+// MARK: - Ball Tracking Protocol
+
+/// 网球追踪协议 - 抽象网球检测和追踪实现
+protocol BallTracking: Actor {
+    /// 分析单帧图像，检测网球
+    /// - Parameters:
+    ///   - pixelBuffer: 像素缓冲区
+    ///   - timestamp: 时间戳（秒）
+    /// - Returns: 网球分析结果
+    func analyze(pixelBuffer: CVPixelBuffer, timestamp: Double) async -> BallAnalysisResult
+
+    /// 批量分析多帧（优化性能）
+    /// - Parameter frames: 帧数组（pixel buffer 和时间戳）
+    /// - Returns: 批量分析结果
+    func analyzeBatch(frames: [(CVPixelBuffer, Double)]) async -> [BallAnalysisResult]
+
+    /// 获取性能统计信息
+    /// - Returns: (已处理帧数, 总检测次数, 平均每帧检测数)
+    func getStatistics() async -> (framesProcessed: Int, totalDetections: Int, avgDetectionsPerFrame: Double)
+
+    /// 重置统计信息
+    func resetStatistics()
+}
+
 // MARK: - Audio Analysis Protocol
 
 /// 音频分析协议 - 抽象音频处理实现
@@ -35,6 +59,37 @@ protocol AudioAnalyzing: Actor {
     ///   - timeRange: 时间范围
     /// - Returns: 音频分析结果
     func analyzeAudio(from asset: AVAsset, timeRange: CMTimeRange) async throws -> AudioAnalysisResult
+}
+
+// MARK: - Ball Visualization Protocol
+
+/// 网球可视化协议 - 抽象可视化绘制实现
+protocol BallVisualizing: Actor {
+    /// 在视频帧上绘制网球检测结果
+    /// - Parameters:
+    ///   - pixelBuffer: 原始视频帧
+    ///   - result: 网球分析结果
+    ///   - audioEvents: 可选的音频事件时间点
+    /// - Returns: 带标注的新 pixel buffer
+    func visualize(
+        pixelBuffer: CVPixelBuffer,
+        result: BallAnalysisResult,
+        audioEvents: [Double]?
+    ) async -> CVPixelBuffer?
+
+    /// 批量可视化多帧
+    /// - Parameters:
+    ///   - frames: 帧数组（pixel buffer 和分析结果）
+    ///   - audioEvents: 可选的音频事件时间点
+    /// - Returns: 带标注的帧数组
+    func visualizeBatch(
+        frames: [(CVPixelBuffer, BallAnalysisResult)],
+        audioEvents: [Double]?
+    ) async -> [CVPixelBuffer]
+
+    /// 获取统计信息
+    /// - Returns: 已可视化的帧数
+    func getStatistics() async -> Int
 }
 
 // MARK: - Rally Detection Protocol

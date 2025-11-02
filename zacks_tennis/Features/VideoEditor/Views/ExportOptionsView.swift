@@ -374,7 +374,7 @@ struct ExportOptionsView: View {
             exportSession.timeRange = CMTimeRange(start: startTime, end: endTime)
 
             // 设置输出路径
-            let fileName = "\(video.title)_rally_\(rally.rallyNumber)_\(Date().timeIntervalSince1970).mp4"
+            let fileName = exportFileName(for: rally, index: index)
             let outputURL = documentsURL.appendingPathComponent(fileName)
 
             // 删除已存在的文件
@@ -428,7 +428,7 @@ struct ExportOptionsView: View {
         let minutes = Int(seconds) / 60
         let secs = Int(seconds) % 60
         return String(format: "%d:%02d", minutes, secs)
-    }
+}
 
     private func formatFileSize(_ bytes: Int) -> String {
         let megabytes = Double(bytes) / 1024.0 / 1024.0
@@ -437,6 +437,11 @@ struct ExportOptionsView: View {
         } else {
             return String(format: "%.0f MB", megabytes)
         }
+    }
+
+    private func exportFileName(for rally: VideoHighlight, index: Int) -> String {
+        let baseName = video.title.sanitizedFileComponent(fallback: "video")
+        return "\(baseName)_rally_\(rally.rallyNumber)_\(index + 1).mp4"
     }
 }
 

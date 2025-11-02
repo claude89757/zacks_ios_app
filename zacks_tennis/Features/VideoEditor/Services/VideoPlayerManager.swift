@@ -99,15 +99,35 @@ final class VideoPlayerManager: ObservableObject {
     /// - Parameters:
     ///   - url: 视频 URL
     ///   - startTime: 开始时间（可选）
-    func play(url: URL, startTime: Double? = nil) {
+    func play(url: URL, startTime: Double? = nil, endTime: Double? = nil, autoStart: Bool = true) {
         let player = getPlayer(for: url)
 
-        if let startTime = startTime {
-            let time = CMTime(seconds: startTime, preferredTimescale: 600)
-            player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+        if let endTime = endTime {
+            let end = CMTime(seconds: endTime, preferredTimescale: 600)
+            player.currentItem?.forwardPlaybackEndTime = end
+        } else {
+            player.currentItem?.forwardPlaybackEndTime = .invalid
         }
 
-        player.play()
+        guard let startTime = startTime else {
+            if autoStart {
+                player.play()
+            } else {
+                player.pause()
+            }
+            return
+        }
+
+        let time = CMTime(seconds: startTime, preferredTimescale: 600)
+        player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { _ in
+            Task { @MainActor in
+                if autoStart {
+                    player.play()
+                } else {
+                    player.pause()
+                }
+            }
+        }
     }
 
     /// 暂停当前播放器

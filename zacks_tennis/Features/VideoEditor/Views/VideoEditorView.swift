@@ -16,6 +16,7 @@ struct VideoEditorView: View {
     @State private var selectedPhotoItem: PhotosPickerItem?
     @State private var showingVideoPicker = false
     @State private var selectedVideo: Video?
+    @State private var showGlobalError = false
 
     var body: some View {
         NavigationStack {
@@ -49,11 +50,19 @@ struct VideoEditorView: View {
                     }
                 }
             }
+            .onChange(of: viewModel.showError) { _, newValue in
+                if newValue {
+                    showGlobalError = true
+                }
+            }
             .onAppear {
                 viewModel.configure(modelContext: modelContext)
             }
-            .alert("错误", isPresented: $viewModel.showError) {
-                Button("确定", role: .cancel) {}
+            .alert("错误", isPresented: $showGlobalError) {
+                Button("确定", role: .cancel) {
+                    showGlobalError = false
+                    viewModel.showError = false
+                }
             } message: {
                 Text(viewModel.errorMessage ?? "未知错误")
             }

@@ -34,8 +34,17 @@ final class VideoProcessingEngine: VideoProcessing {
     /// 音频分析器（协议类型 - 支持依赖注入）
     private let audioAnalyzer: any AudioAnalyzing
 
+    /// 网球追踪分析器（协议类型 - 支持依赖注入）
+    private let ballTracker: (any BallTracking)?
+
+    /// 网球可视化引擎（协议类型 - 支持依赖注入）
+    private let ballVisualizer: (any BallVisualizing)?
+
     /// 状态管理器（协议类型 - 支持依赖注入）
     private let stateManager: any ProcessingStateManaging
+
+    /// 回合检测引擎（音频聚类）
+    private let rallyDetectionEngine: RallyDetectionEngine
 
     // MARK: - Constants
 
@@ -48,22 +57,45 @@ final class VideoProcessingEngine: VideoProcessing {
     /// - Parameters:
     ///   - visionAnalyzer: Vision 分析器
     ///   - audioAnalyzer: 音频分析器
+    ///   - ballTracker: 网球追踪分析器（可选）
+    ///   - ballVisualizer: 网球可视化引擎（可选）
     ///   - stateManager: 状态管理器
+    ///   - rallyDetectionEngine: 回合检测引擎（可选，默认使用默认配置）
     init(
         visionAnalyzer: any FrameAnalyzing,
         audioAnalyzer: any AudioAnalyzing,
-        stateManager: any ProcessingStateManaging
+        ballTracker: (any BallTracking)? = nil,
+        ballVisualizer: (any BallVisualizing)? = nil,
+        stateManager: any ProcessingStateManaging,
+        rallyDetectionEngine: RallyDetectionEngine? = nil
     ) {
         self.visionAnalyzer = visionAnalyzer
         self.audioAnalyzer = audioAnalyzer
+        self.ballTracker = ballTracker
+        self.ballVisualizer = ballVisualizer
         self.stateManager = stateManager
+        self.rallyDetectionEngine = rallyDetectionEngine ?? RallyDetectionEngine()
     }
 
-    /// 便利初始化器 - 使用默认实现
-    convenience init() {
+    /// 便利初始化器 - 使用默认实现（包含网球追踪）
+    convenience init(enableBallTracking: Bool = true) {
+        let tracker: (any BallTracking)? = if enableBallTracking {
+            BallTrackingAnalyzer()
+        } else {
+            nil
+        }
+
+        let visualizer: (any BallVisualizing)? = if enableBallTracking {
+            BallVisualizationEngine()
+        } else {
+            nil
+        }
+
         self.init(
             visionAnalyzer: VisionAnalyzer(),
             audioAnalyzer: AudioAnalyzer(),
+            ballTracker: tracker,
+            ballVisualizer: visualizer,
             stateManager: ProcessingStateManager.shared
         )
     }
@@ -211,6 +243,7 @@ final class VideoProcessingEngine: VideoProcessing {
 
         // 用于检测回合的临时数据
         var frameAnalysisResults: [FrameAnalysisResult] = []
+        var ballAnalysisResults: [BallAnalysisResult] = []  // 网球分析结果
         var detectedRallies: [VideoHighlight] = []
         var lastSampledTime: Double = startTime
 
@@ -260,14 +293,20 @@ final class VideoProcessingEngine: VideoProcessing {
                 frameAnalysisResults.append(frameResult)
             }
 
-            // 每积累一定数量的帧，尝试检测回合
-            if frameAnalysisResults.count >= config.rallyDetectionWindowSize {
-                // 等待音频分析完成（如果还没完成）
-                let audioResult = await audioAnalysisTask.value
+            // 网球追踪分析（如果启用）
+            if let ballTracker = ballTracker {
+                let ballResult = await ballTracker.analyze(pixelBuffer: imageBuffer, timestamp: currentTime)
+                ballAnalysisResults.append(ballResult)
+            }
 
-                if let rally = detectRally(
+            // 每积累一定数量的帧，尝试检测回合（视觉检测作为备选）
+            // 注意：音频聚类检测在段处理完成后统一进行
+            if frameAnalysisResults.count >= config.rallyDetectionWindowSize {
+                // 视觉检测作为降级策略（如果音频检测失败）
+                if let rally = detectRallyUsingVisual(
                     from: frameAnalysisResults,
-                    audioResult: audioResult,
+                    ballResults: ballAnalysisResults,
+                    audioResult: await audioAnalysisTask.value,
                     video: video,
                     currentRallyNumber: currentRallyCount + detectedRallies.count + 1
                 ) {
@@ -280,10 +319,15 @@ final class VideoProcessingEngine: VideoProcessing {
 
                     // 清空分析结果，准备检测下一个回合
                     frameAnalysisResults.removeAll(keepingCapacity: true)
+                    ballAnalysisResults.removeAll(keepingCapacity: true)
                 } else {
                     // 保留最近的帧，使用滑动窗口
                     if frameAnalysisResults.count > config.rallyDetectionWindowSize * 2 {
                         frameAnalysisResults.removeFirst(config.rallyDetectionWindowSize)
+                        // 同步清理网球分析结果
+                        if ballAnalysisResults.count > config.rallyDetectionWindowSize * 2 {
+                            ballAnalysisResults.removeFirst(config.rallyDetectionWindowSize)
+                        }
                     }
                 }
             }
@@ -323,6 +367,78 @@ final class VideoProcessingEngine: VideoProcessing {
             throw ProcessingError.readFailed(reader.error)
         }
 
+        // 段处理完成后，使用音频聚类进行最终检测
+        // 先更新进度，表示帧处理完成，正在等待音频分析
+        let frameProcessingProgress = (endTime / totalDuration) * 0.9 // 帧处理占90%进度
+        Task { @MainActor in
+            let progress = ProcessingProgress(
+                currentTime: endTime,
+                totalDuration: totalDuration,
+                segmentProgress: 1.0,
+                overallProgress: frameProcessingProgress,
+                detectedRalliesCount: currentRallyCount + detectedRallies.count,
+                currentOperation: "分析音频中..."
+            )
+            onProgressUpdate?(progress)
+        }
+        
+        let finalAudioResult = await audioAnalysisTask.value
+        
+        print("🔍 [VideoProcessing] 段音频分析完成: 检测到 \(finalAudioResult.hitSounds.count) 个音频峰值")
+        if !finalAudioResult.hitSounds.isEmpty {
+            print("🔍 [VideoProcessing] 峰值时间范围: \(String(format: "%.2f", finalAudioResult.hitSounds.first!.time))s - \(String(format: "%.2f", finalAudioResult.hitSounds.last!.time))s")
+            print("🔍 [VideoProcessing] 峰值置信度范围: \(String(format: "%.2f", finalAudioResult.hitSounds.map { $0.confidence }.min() ?? 0)) - \(String(format: "%.2f", finalAudioResult.hitSounds.map { $0.confidence }.max() ?? 0))")
+        }
+        
+        let audioRallies = await rallyDetectionEngine.detectRallies(audioResult: finalAudioResult)
+        print("🔍 [VideoProcessing] 音频聚类检测到 \(audioRallies.count) 个回合")
+        
+        // 将音频检测到的回合转换为VideoHighlight
+        var audioDetectedRallies: [VideoHighlight] = []
+        for (index, rally) in audioRallies.enumerated() {
+            print("🔍 [VideoProcessing] 回合 #\(index + 1): \(String(format: "%.2f", rally.startTime))s - \(String(format: "%.2f", rally.endTime))s (段范围: \(String(format: "%.2f", startTime))s - \(String(format: "%.2f", endTime))s)")
+            
+            // 检查回合是否在当前段的时间范围内（放宽条件：只要回合与段有重叠即可）
+            let rallyOverlapsSegment = rally.startTime < endTime && rally.endTime > startTime
+            
+            if rallyOverlapsSegment {
+                print("✅ [VideoProcessing] 回合 #\(index + 1) 与段重叠，添加到结果")
+                let highlight = createHighlightFromRally(
+                    rally: rally,
+                    video: video,
+                    currentRallyNumber: currentRallyCount + detectedRallies.count + audioDetectedRallies.count + index + 1,
+                    frames: frameAnalysisResults,
+                    ballResults: ballAnalysisResults,
+                    audioResult: finalAudioResult
+                )
+                audioDetectedRallies.append(highlight)
+            } else {
+                print("❌ [VideoProcessing] 回合 #\(index + 1) 不在段范围内，跳过")
+            }
+        }
+
+        // 如果音频检测到回合，优先使用音频结果；否则使用视觉检测结果
+        if !audioDetectedRallies.isEmpty {
+            print("✅ [VideoProcessing] 使用音频检测结果: \(audioDetectedRallies.count) 个回合")
+            return audioDetectedRallies
+        }
+
+        print("⚠️ [VideoProcessing] 音频检测未找到回合，使用视觉检测结果: \(detectedRallies.count) 个回合")
+        
+        // 更新最终进度
+        let finalProgress = min(endTime / totalDuration, 1.0)
+        Task { @MainActor in
+            let progress = ProcessingProgress(
+                currentTime: endTime,
+                totalDuration: totalDuration,
+                segmentProgress: 1.0,
+                overallProgress: finalProgress,
+                detectedRalliesCount: currentRallyCount + detectedRallies.count,
+                currentOperation: "段处理完成"
+            )
+            onProgressUpdate?(progress)
+        }
+        
         return detectedRallies
     }
 
@@ -350,11 +466,30 @@ final class VideoProcessingEngine: VideoProcessing {
                 timeRange: timeRange
             )
 
+            print("✅ [VideoProcessing] 音频分析成功: 检测到 \(result.hitSounds.count) 个峰值")
             return result
         } catch {
             // 音频分析失败时返回空结果
             print("⚠️ 音频分析失败: \(error.localizedDescription)")
-            return AudioAnalysisResult(hitSounds: [])
+            
+            // 降级策略：尝试使用更宽松的配置重试
+            print("🔄 尝试使用宽松配置重试音频分析...")
+            do {
+                let timeRange = CMTimeRange(
+                    start: CMTime(seconds: startTime, preferredTimescale: 600),
+                    end: CMTime(seconds: endTime, preferredTimescale: 600)
+                )
+                // 这里可以尝试使用更宽松的音频分析配置
+                let result = try await audioAnalyzer.analyzeAudio(
+                    from: asset,
+                    timeRange: timeRange
+                )
+                print("✅ 降级音频分析成功，检测到 \(result.hitSounds.count) 个峰值")
+                return result
+            } catch {
+                print("❌ 降级音频分析也失败: \(error.localizedDescription)")
+                return AudioAnalysisResult(hitSounds: [])
+            }
         }
     }
 
@@ -406,82 +541,297 @@ final class VideoProcessingEngine: VideoProcessing {
 
     // MARK: - Private Methods - Rally Detection
 
-    /// 从帧分析结果中检测回合
-    private func detectRally(
+    /// 使用视觉特征检测回合（降级策略）
+    private func detectRallyUsingVisual(
         from frames: [FrameAnalysisResult],
+        ballResults: [BallAnalysisResult],
         audioResult: AudioAnalysisResult,
         video: Video,
         currentRallyNumber: Int
     ) -> VideoHighlight? {
+
+        // 优先策略：如果有网球追踪数据，优先使用网球检测
+        let useBallTracking = !ballResults.isEmpty
 
         // 查找连续的高强度运动区间
         var rallyStart: Double?
         var rallyEnd: Double?
         var intensitySum: Double = 0
         var validFrameCount: Int = 0
-        var hasAudioPeaks = false
+        var ballTrajectoryPoints: [BallTrajectoryPoint] = []
+        var ballDetectionCount: Int = 0
 
-        for frame in frames {
-            if frame.movementIntensity > config.thresholds.movementIntensityThreshold {
+        // 合并处理：使用网球检测或姿态检测
+        if useBallTracking {
+            // 网球追踪模式
+            for ballResult in ballResults {
+                // 判断是否有移动的网球
+                let hasMovingBall = ballResult.primaryBall?.isMoving(threshold: 0.05) ?? false
+
+                if hasMovingBall {
+                    if rallyStart == nil {
+                        rallyStart = ballResult.timestamp
+                    }
+                    rallyEnd = ballResult.timestamp
+
+                    // 累积网球轨迹数据
+                    if let primaryBall = ballResult.primaryBall {
+                        ballDetectionCount += 1
+                        let trajectoryPoint = BallTrajectoryPoint(
+                            timestamp: primaryBall.timestamp,
+                            position: CodablePoint(primaryBall.center),
+                            velocity: CodableVector(primaryBall.velocity),
+                            confidence: primaryBall.confidence
+                        )
+                        ballTrajectoryPoints.append(trajectoryPoint)
+                    }
+
+                    // 使用网球移动强度作为intensity
+                    let ballIntensity = ballResult.primaryBall?.movementMagnitude ?? 0.0
+                    intensitySum += ballIntensity
+                    validFrameCount += 1
+                } else {
+                    // 检测到网球停止，判断是否回合结束
+                    if let start = rallyStart,
+                       let end = rallyEnd,
+                       end - start >= config.thresholds.minimumRallyDuration {
+
+                        return createHighlight(
+                            start: start,
+                            end: end,
+                            intensitySum: intensitySum,
+                            validFrameCount: validFrameCount,
+                            audioResult: audioResult,
+                            frames: frames,
+                            video: video,
+                            currentRallyNumber: currentRallyNumber,
+                            ballTrajectoryPoints: ballTrajectoryPoints,
+                            ballDetectionCount: ballDetectionCount
+                        )
+                    }
+
+                    // 重置
+                    rallyStart = nil
+                    rallyEnd = nil
+                    intensitySum = 0
+                    validFrameCount = 0
+                    ballTrajectoryPoints.removeAll(keepingCapacity: true)
+                    ballDetectionCount = 0
+                }
+            }
+        } else {
+            // 降级到姿态检测模式（原有逻辑）
+            for frame in frames {
+                if frame.movementIntensity > config.thresholds.movementIntensityThreshold {
                 if rallyStart == nil {
                     rallyStart = frame.timestamp
                 }
                 rallyEnd = frame.timestamp
-                intensitySum += frame.movementIntensity
-                validFrameCount += 1
-            } else {
-                // 检测到低强度帧，判断是否回合结束
-                if let start = rallyStart,
-                   let end = rallyEnd,
-                   end - start >= config.thresholds.minimumRallyDuration {
+                    intensitySum += frame.movementIntensity
+                    validFrameCount += 1
+                } else {
+                    // 检测到低强度帧，判断是否回合结束
+                    if let start = rallyStart,
+                       let end = rallyEnd,
+                       end - start >= config.thresholds.minimumRallyDuration {
 
-                    // 检查此时间段内是否有击球声（增强检测准确性）
-                    hasAudioPeaks = audioResult.hitSounds.contains { peak in
-                        peak.time >= start && peak.time <= end && peak.confidence > config.thresholds.audioHitConfidence
+                        return createHighlight(
+                            start: start,
+                            end: end,
+                            intensitySum: intensitySum,
+                            validFrameCount: validFrameCount,
+                            audioResult: audioResult,
+                            frames: frames,
+                            video: video,
+                            currentRallyNumber: currentRallyNumber,
+                            ballTrajectoryPoints: [],
+                            ballDetectionCount: 0
+                        )
                     }
 
-                    // 找到有效回合
-                    let avgIntensity = intensitySum / Double(validFrameCount)
-                    let excitementScore = calculateExcitementScore(
-                        duration: end - start,
-                        intensity: avgIntensity,
-                        hasAudioPeaks: hasAudioPeaks
-                    )
-
-                    let highlight = VideoHighlight(
-                        video: video,
-                        rallyNumber: currentRallyNumber,
-                        startTime: max(0, start - 1.0), // 前置 1 秒缓冲
-                        endTime: min(video.duration, end + 1.0), // 后置 1 秒缓冲
-                        excitementScore: excitementScore,
-                        videoFilePath: video.originalFilePath, // 使用原视频路径
-                        type: classifyRallyType(duration: end - start, intensity: avgIntensity)
-                    )
-
-                    highlight.rallyDescription = "回合 #\(currentRallyNumber)"
-                    highlight.detectionConfidence = min(1.0, avgIntensity)
-
-                    // 更新检测元数据
-                    highlight.metadata = DetectionMetadata(
-                        maxMovementIntensity: frames.map(\.movementIntensity).max() ?? 0.0,
-                        avgMovementIntensity: avgIntensity,
-                        hasAudioPeaks: hasAudioPeaks,
-                        poseConfidenceAvg: frames.map(\.confidence).reduce(0, +) / Double(frames.count)
-                    )
-
-                    return highlight
+                    // 重置检测状态
+                    rallyStart = nil
+                    rallyEnd = nil
+                    intensitySum = 0
+                    validFrameCount = 0
                 }
-
-                // 重置检测状态
-                rallyStart = nil
-                rallyEnd = nil
-                intensitySum = 0
-                validFrameCount = 0
-                hasAudioPeaks = false
             }
         }
 
         return nil
+    }
+
+    /// 从Rally对象创建VideoHighlight（音频聚类结果）
+    private func createHighlightFromRally(
+        rally: Rally,
+        video: Video,
+        currentRallyNumber: Int,
+        frames: [FrameAnalysisResult],
+        ballResults: [BallAnalysisResult],
+        audioResult: AudioAnalysisResult? = nil
+    ) -> VideoHighlight {
+        
+        // 计算精彩度评分
+        let excitementScore = calculateExcitementScoreFromRally(
+            rally: rally,
+            frames: frames
+        )
+
+        // 创建 VideoHighlight
+        let highlight = VideoHighlight(
+            video: video,
+            rallyNumber: currentRallyNumber,
+            startTime: rally.startTime,
+            endTime: rally.endTime,
+            excitementScore: excitementScore,
+            videoFilePath: video.originalFilePath,
+            type: classifyRallyType(duration: rally.duration, intensity: rally.metadata.avgMovementIntensity)
+        )
+
+        highlight.rallyDescription = "回合 #\(currentRallyNumber)"
+        highlight.detectionConfidence = min(1.0, rally.metadata.avgMovementIntensity > 0 ? rally.metadata.avgMovementIntensity : 0.6)
+        
+        // 设置元数据（从Rally中获取）
+        var metadata = rally.metadata
+        
+        // 从音频分析结果中提取本回合的音频峰值时间点
+        if let audioResult = audioResult {
+            // 提取该回合时间范围内的音频峰值时间点
+            let peakTimestamps = audioResult.hitSounds
+                .filter { $0.time >= rally.startTime && $0.time <= rally.endTime }
+                .map { $0.time }
+            metadata.audioPeakTimestamps = peakTimestamps.isEmpty ? nil : peakTimestamps
+        }
+        
+        highlight.metadata = metadata
+
+        // 添加网球轨迹数据（如果有）
+        if let ballTrajectory = rally.ballTrajectory {
+            highlight.ballTrajectoryData = ballTrajectory
+        }
+
+        return highlight
+    }
+    
+    /// 提取回合对应的音频分析结果（辅助方法）
+    private func extractAudioResultForRally(rally: Rally, finalAudioResult: AudioAnalysisResult) -> AudioAnalysisResult? {
+        // 过滤出该回合时间范围内的音频峰值
+        let relevantPeaks = finalAudioResult.hitSounds.filter { peak in
+            peak.time >= rally.startTime && peak.time <= rally.endTime
+        }
+        return AudioAnalysisResult(hitSounds: relevantPeaks)
+    }
+
+    /// 从Rally计算精彩度评分
+    private func calculateExcitementScoreFromRally(
+        rally: Rally,
+        frames: [FrameAnalysisResult]
+    ) -> Double {
+        // 使用Rally的元数据计算，如果没有则使用默认值
+        let duration = rally.duration
+        let intensity = rally.metadata.avgMovementIntensity > 0 ? 
+            rally.metadata.avgMovementIntensity : 
+            (frames.isEmpty ? 0.5 : frames.map(\.movementIntensity).reduce(0, +) / Double(frames.count))
+        let hasAudioPeaks = rally.metadata.hasAudioPeaks
+
+        return calculateExcitementScore(
+            duration: duration,
+            intensity: intensity,
+            hasAudioPeaks: hasAudioPeaks
+        )
+    }
+
+    /// 创建VideoHighlight对象（统一的辅助方法）
+    private func createHighlight(
+        start: Double,
+        end: Double,
+        intensitySum: Double,
+        validFrameCount: Int,
+        audioResult: AudioAnalysisResult,
+        frames: [FrameAnalysisResult],
+        video: Video,
+        currentRallyNumber: Int,
+        ballTrajectoryPoints: [BallTrajectoryPoint],
+        ballDetectionCount: Int
+    ) -> VideoHighlight {
+
+        // 检查此时间段内是否有击球声（增强检测准确性）
+        let hasAudioPeaks = audioResult.hitSounds.contains { peak in
+            peak.time >= start && peak.time <= end && peak.confidence > config.thresholds.audioHitConfidence
+        }
+
+        // 计算平均强度
+        let avgIntensity = validFrameCount > 0 ? intensitySum / Double(validFrameCount) : 0.0
+
+        // 计算精彩度评分
+        let excitementScore = calculateExcitementScore(
+            duration: end - start,
+            intensity: avgIntensity,
+            hasAudioPeaks: hasAudioPeaks
+        )
+
+        // 创建 VideoHighlight
+        let highlight = VideoHighlight(
+            video: video,
+            rallyNumber: currentRallyNumber,
+            startTime: max(0, start - 1.0), // 前置 1 秒缓冲
+            endTime: min(video.duration, end + 1.0), // 后置 1 秒缓冲
+            excitementScore: excitementScore,
+            videoFilePath: video.originalFilePath,
+            type: classifyRallyType(duration: end - start, intensity: avgIntensity)
+        )
+
+        highlight.rallyDescription = "回合 #\(currentRallyNumber)"
+        highlight.detectionConfidence = min(1.0, avgIntensity)
+
+        // 更新检测元数据
+        var metadata = DetectionMetadata(
+            maxMovementIntensity: frames.map(\.movementIntensity).max() ?? 0.0,
+            avgMovementIntensity: avgIntensity,
+            hasAudioPeaks: hasAudioPeaks,
+            poseConfidenceAvg: frames.isEmpty ? 0.0 : frames.map(\.confidence).reduce(0, +) / Double(frames.count),
+            estimatedHitCount: nil,
+            playerCount: nil,
+            audioPeakTimestamps: nil
+        )
+        
+        // 提取该回合时间范围内的音频峰值时间点
+        let peakTimestamps = audioResult.hitSounds
+            .filter { $0.time >= start && $0.time <= end && $0.confidence > config.thresholds.audioHitConfidence }
+            .map { $0.time }
+        metadata.audioPeakTimestamps = peakTimestamps.isEmpty ? nil : peakTimestamps
+        
+        highlight.metadata = metadata
+
+        // 添加网球轨迹数据（如果有）
+        if ballDetectionCount > 0 {
+            let avgBallConfidence = ballTrajectoryPoints.isEmpty ? 0.0 :
+                ballTrajectoryPoints.map(\.confidence).reduce(0, +) / Double(ballTrajectoryPoints.count)
+            let maxVelocity = ballTrajectoryPoints.map(\.velocity.magnitude).max() ?? 0.0
+            let avgVelocity = ballTrajectoryPoints.isEmpty ? 0.0 :
+                ballTrajectoryPoints.map(\.velocity.magnitude).reduce(0, +) / Double(ballTrajectoryPoints.count)
+
+            // 计算总移动距离
+            var totalDistance: Double = 0.0
+            for i in 1..<ballTrajectoryPoints.count {
+                let p1 = ballTrajectoryPoints[i-1].position
+                let p2 = ballTrajectoryPoints[i].position
+                let dx = p2.x - p1.x
+                let dy = p2.y - p1.y
+                totalDistance += sqrt(dx * dx + dy * dy)
+            }
+
+            highlight.ballTrajectoryData = BallTrajectoryData(
+                trajectoryPoints: ballTrajectoryPoints,
+                detectionCount: ballDetectionCount,
+                avgConfidence: avgBallConfidence,
+                maxVelocity: maxVelocity,
+                avgVelocity: avgVelocity,
+                totalDistance: totalDistance
+            )
+        }
+
+        return highlight
     }
 
     /// 计算精彩度评分

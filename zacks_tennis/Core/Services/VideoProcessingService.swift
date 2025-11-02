@@ -40,9 +40,27 @@ class VideoProcessingService {
         let fileSize = try getFileSize(from: url)
 
         // 复制到 Documents 目录
-        let fileName = "\(UUID().uuidString).mp4"
+        let fileName = "\(UUID().uuidString).\(url.pathExtension)"
         let destinationURL = getDocumentsDirectory().appendingPathComponent(fileName)
+        
+        print("📁 复制视频到 Documents 目录")
+        print("   源: \(url.path)")
+        print("   目标: \(destinationURL.path)")
+        
+        // 如果目标文件已存在，先删除
+        if FileManager.default.fileExists(atPath: destinationURL.path) {
+            try? FileManager.default.removeItem(at: destinationURL)
+        }
+        
         try FileManager.default.copyItem(at: url, to: destinationURL)
+        
+        // 验证复制成功
+        guard FileManager.default.fileExists(atPath: destinationURL.path),
+              FileManager.default.isReadableFile(atPath: destinationURL.path) else {
+            throw VideoError.exportFailedWithReason("视频文件复制失败，无法访问目标文件")
+        }
+        
+        print("   ✅ 视频文件复制成功")
 
         // 生成缩略图
         let thumbnailPath = try await generateThumbnail(from: asset, videoID: fileName)
@@ -83,10 +101,11 @@ class VideoProcessingService {
             let progress = Double(index) / Double(highlights.count)
             await updateProgress(progress, operation: "导出片段 \(index + 1)/\(highlights.count)")
 
+            let fileName = makeExportFileName(for: video, exportName: "highlight", index: index + 1)
             let exportedFile = try await exportHighlight(
                 from: video,
                 highlight: highlight,
-                fileName: "\(video.title)_highlight_\(index + 1).mp4"
+                fileName: fileName
             )
             exportedFiles.append(exportedFile)
         }
@@ -109,10 +128,38 @@ class VideoProcessingService {
             let progress = Double(index) / Double(highlights.count)
             await updateProgress(progress, operation: "导出片段 \(index + 1)/\(highlights.count)")
 
+            let fileName = makeExportFileName(for: video, exportName: exportName, index: index + 1)
             let exportedFile = try await exportHighlight(
                 from: video,
                 highlight: highlight,
-                fileName: "\(video.title)_\(exportName)_\(index + 1).mp4"
+                fileName: fileName
+            )
+            exportedFiles.append(exportedFile)
+        }
+
+        await updateProgress(1.0, operation: "导出完成")
+
+        return exportedFiles
+    }
+
+    /// 导出带网球标注的精彩片段（调试用）
+    func exportWithBallAnnotations(from video: Video, highlights: [VideoHighlight], exportName: String) async throws -> [ExportedFile] {
+        isProcessing = true
+        processingProgress = 0.0
+        currentOperation = "正在导出带标注的视频..."
+        defer { isProcessing = false }
+
+        var exportedFiles: [ExportedFile] = []
+
+        for (index, highlight) in highlights.enumerated() {
+            let progress = Double(index) / Double(highlights.count)
+            await updateProgress(progress, operation: "导出带标注片段 \(index + 1)/\(highlights.count)")
+
+            let fileName = makeExportFileName(for: video, exportName: exportName, index: index + 1)
+            let exportedFile = try await exportHighlightWithAnnotations(
+                from: video,
+                highlight: highlight,
+                fileName: fileName
             )
             exportedFiles.append(exportedFile)
         }
@@ -124,15 +171,78 @@ class VideoProcessingService {
 
     /// 导出单个精彩片段
     private func exportHighlight(from video: Video, highlight: VideoHighlight, fileName: String) async throws -> ExportedFile {
+        print("🎬 开始导出: \(fileName)")
+        
+        // 验证0: 检查视频路径是否为空
+        guard !video.originalFilePath.isEmpty else {
+            print("   ❌ 错误: 视频文件路径为空")
+            throw VideoError.exportFailedWithReason("视频文件路径为空，请重新导入视频")
+        }
+        
         let videoURL = getVideoURL(for: video)
+        print("   源视频路径: \(video.originalFilePath)")
+        print("   完整URL: \(videoURL.path)")
+        print("   时间范围: \(highlight.startTime)s - \(highlight.endTime)s")
+
+        // 验证1: 检查源视频文件是否存在
+        guard FileManager.default.fileExists(atPath: videoURL.path) else {
+            print("   ❌ 错误: 源视频文件不存在")
+            print("   检查路径: \(videoURL.path)")
+            
+            // 列出Documents目录内容以便调试
+            let documentsURL = getDocumentsDirectory()
+            if let files = try? FileManager.default.contentsOfDirectory(at: documentsURL, includingPropertiesForKeys: nil) {
+                print("   Documents目录中的视频文件:")
+                for file in files.filter({ $0.pathExtension == "mp4" || $0.pathExtension == "mov" }) {
+                    print("     - \(file.lastPathComponent)")
+                }
+            }
+            
+            throw VideoError.exportFailedWithReason("源视频文件不存在: \(videoURL.lastPathComponent)。文件可能已被删除，请重新导入视频")
+        }
+        
+        // 验证1.5: 检查文件是否可读
+        guard FileManager.default.isReadableFile(atPath: videoURL.path) else {
+            print("   ❌ 错误: 源视频文件不可读")
+            throw VideoError.exportFailedWithReason("源视频文件不可读，请检查文件权限")
+        }
+        
+        print("   ✅ 源视频文件验证通过")
+
+        // 验证2: 检查时间范围是否有效
+        guard highlight.startTime >= 0 && highlight.endTime > highlight.startTime else {
+            print("   ❌ 错误: 时间范围无效")
+            throw VideoError.exportFailedWithReason("时间范围无效 (\(highlight.startTime)s - \(highlight.endTime)s)")
+        }
+
         let asset = AVAsset(url: videoURL)
+
+        // 验证3: 检查AVAsset是否可用
+        do {
+            let isPlayable = try await asset.load(.isPlayable)
+            guard isPlayable else {
+                print("   ❌ 错误: 视频文件不可播放")
+                throw VideoError.exportFailedWithReason("视频文件损坏或格式不支持")
+            }
+        } catch {
+            print("   ❌ 错误: 无法加载视频资源: \(error.localizedDescription)")
+            throw VideoError.exportFailedWithReason("无法加载视频资源: \(error.localizedDescription)")
+        }
+
+        // 验证4: 检查时间范围是否在视频时长内
+        let duration = try await asset.load(.duration)
+        guard highlight.endTime <= duration.seconds else {
+            print("   ❌ 错误: 结束时间超出视频时长")
+            throw VideoError.exportFailedWithReason("结束时间(\(highlight.endTime)s)超出视频时长(\(duration.seconds)s)")
+        }
 
         // 创建导出会话
         guard let exportSession = AVAssetExportSession(
             asset: asset,
             presetName: AVAssetExportPresetHighestQuality
         ) else {
-            throw VideoError.exportFailed
+            print("   ❌ 错误: 无法创建导出会话")
+            throw VideoError.exportFailedWithReason("无法创建导出会话。可能原因: 视频格式不支持、编解码器不兼容或系统资源不足")
         }
 
         // 设置时间范围
@@ -148,14 +258,52 @@ class VideoProcessingService {
         exportSession.outputURL = outputURL
         exportSession.outputFileType = .mp4
 
-        // 执行导出
-        await exportSession.export()
+        print("   输出路径: \(outputURL.path)")
 
+        // 执行导出并监控进度
+        let exportTask = Task {
+            while exportSession.status == .exporting {
+                let progress = Double(exportSession.progress)
+                await updateProgress(progress, operation: "导出片段... \(Int(progress * 100))%")
+                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1秒
+            }
+        }
+
+        await exportSession.export()
+        exportTask.cancel()
+
+        // 检查导出状态并捕获详细错误
         guard exportSession.status == .completed else {
-            throw VideoError.exportFailed
+            let statusDescription: String
+            switch exportSession.status {
+            case .failed:
+                statusDescription = "失败"
+            case .cancelled:
+                statusDescription = "已取消"
+            case .unknown:
+                statusDescription = "未知状态"
+            case .waiting:
+                statusDescription = "等待中"
+            case .exporting:
+                statusDescription = "导出中"
+            case .completed:
+                statusDescription = "已完成"
+            @unknown default:
+                statusDescription = "未知(\(exportSession.status.rawValue))"
+            }
+
+            if let error = exportSession.error {
+                print("   ❌ 导出失败: \(statusDescription)")
+                print("   错误详情: \(error.localizedDescription)")
+                throw VideoError.exportFailedWithReason("\(statusDescription) - \(error.localizedDescription)")
+            } else {
+                print("   ❌ 导出失败: \(statusDescription)")
+                throw VideoError.exportFailedWithReason("导出状态: \(statusDescription)")
+            }
         }
 
         let fileSize = try getFileSize(from: outputURL)
+        print("   ✅ 导出成功! 文件大小: \(fileSize) bytes")
 
         return ExportedFile(
             id: UUID(),
@@ -164,6 +312,195 @@ class VideoProcessingService {
             type: "highlight",
             fileSize: fileSize
         )
+    }
+
+    /// 导出带网球标注的单个精彩片段
+    private func exportHighlightWithAnnotations(from video: Video, highlight: VideoHighlight, fileName: String) async throws -> ExportedFile {
+        print("🎬 开始导出带标注的视频: \(fileName)")
+
+        // 基本验证（复用exportHighlight的逻辑）
+        guard !video.originalFilePath.isEmpty else {
+            throw VideoError.exportFailedWithReason("视频文件路径为空")
+        }
+
+        let videoURL = getVideoURL(for: video)
+        guard FileManager.default.fileExists(atPath: videoURL.path) else {
+            throw VideoError.exportFailedWithReason("源视频文件不存在")
+        }
+
+        let asset = AVAsset(url: videoURL)
+
+        // 如果highlight没有ballTrajectoryData，直接调用普通导出
+        guard let ballTrajectory = highlight.ballTrajectoryData, !ballTrajectory.trajectoryPoints.isEmpty else {
+            print("   ⚠️ 该回合没有网球轨迹数据，使用普通导出")
+            return try await exportHighlight(from: video, highlight: highlight, fileName: fileName)
+        }
+
+        print("   ✅ 找到 \(ballTrajectory.trajectoryPoints.count) 个网球轨迹点")
+
+        // 创建输出路径
+        let outputURL = getDocumentsDirectory().appendingPathComponent(fileName)
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            try FileManager.default.removeItem(at: outputURL)
+        }
+
+        // 使用AVAssetReader和AVAssetWriter进行逐帧处理
+        try await exportVideoWithAnnotations(
+            asset: asset,
+            outputURL: outputURL,
+            timeRange: CMTimeRange(
+                start: CMTime(seconds: highlight.startTime, preferredTimescale: 600),
+                end: CMTime(seconds: highlight.endTime, preferredTimescale: 600)
+            ),
+            ballTrajectory: ballTrajectory,
+            highlightStartTime: highlight.startTime
+        )
+
+        let fileSize = try getFileSize(from: outputURL)
+        print("   ✅ 带标注视频导出成功! 文件大小: \(fileSize) bytes")
+
+        return ExportedFile(
+            id: UUID(),
+            filePath: fileName,
+            exportedAt: Date(),
+            type: "annotated-highlight",
+            fileSize: fileSize
+        )
+    }
+
+    /// 使用逐帧处理导出带标注的视频
+    private nonisolated func exportVideoWithAnnotations(
+        asset: AVAsset,
+        outputURL: URL,
+        timeRange: CMTimeRange,
+        ballTrajectory: BallTrajectoryData,
+        highlightStartTime: Double
+    ) async throws {
+
+        // 加载视频轨道
+        let tracks = try await asset.load(.tracks)
+        guard let videoTrack = tracks.first(where: { $0.mediaType == .video }) else {
+            throw VideoError.exportFailedWithReason("找不到视频轨道")
+        }
+
+        let naturalSize = try await videoTrack.load(.naturalSize)
+
+        // 创建AssetReader
+        let reader = try AVAssetReader(asset: asset)
+        reader.timeRange = timeRange
+
+        let readerOutputSettings: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ]
+
+        let readerOutput = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: readerOutputSettings)
+        reader.add(readerOutput)
+
+        // 创建AssetWriter
+        let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
+
+        let writerInputSettings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: naturalSize.width,
+            AVVideoHeightKey: naturalSize.height
+        ]
+
+        let writerInput = AVAssetWriterInput(mediaType: .video, outputSettings: writerInputSettings)
+        writerInput.expectsMediaDataInRealTime = false
+
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: writerInput,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: naturalSize.width,
+                kCVPixelBufferHeightKey as String: naturalSize.height
+            ]
+        )
+
+        writer.add(writerInput)
+
+        // 创建网球可视化引擎
+        let visualizer = BallVisualizationEngine()
+
+        // 开始读写
+        reader.startReading()
+        writer.startWriting()
+        writer.startSession(atSourceTime: timeRange.start)
+
+        var frameIndex = 0
+        let trajectoryPoints = ballTrajectory.trajectoryPoints
+
+        // 逐帧处理（需要使用同步方式）
+        await withTaskGroup(of: Void.self) { group in
+            while reader.status == .reading {
+                guard let sampleBuffer = readerOutput.copyNextSampleBuffer() else {
+                    break
+                }
+
+                let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer)
+                let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+
+                CMSampleBufferInvalidate(sampleBuffer)
+
+                guard let imageBuffer = imageBuffer else {
+                    continue
+                }
+
+                let timestamp = CMTimeGetSeconds(presentationTime) - CMTimeGetSeconds(timeRange.start)
+
+                // 找到当前时间戳对应的网球检测数据
+                let relevantPoints = trajectoryPoints.filter { point in
+                    abs(point.timestamp - (timestamp + highlightStartTime)) < 0.1
+                }
+
+                // 构造BallAnalysisResult（用于可视化）
+                let detections = relevantPoints.map { point in
+                    BallDetection(
+                        boundingBox: CGRect(
+                            x: point.position.x - 0.02,
+                            y: point.position.y - 0.02,
+                            width: 0.04,
+                            height: 0.04
+                        ),
+                        center: point.position.cgPoint,
+                        velocity: point.velocity.cgVector,
+                        confidence: point.confidence,
+                        timestamp: point.timestamp,
+                        trajectory: nil
+                    )
+                }
+
+                let ballResult = BallAnalysisResult(timestamp: timestamp, detections: detections)
+
+                // 使用可视化引擎添加标注（同步等待）
+                if let annotatedBuffer = await visualizer.visualize(
+                    pixelBuffer: imageBuffer,
+                    result: ballResult,
+                    audioEvents: nil
+                ) {
+                    // 等待writer准备好
+                    while !writerInput.isReadyForMoreMediaData {
+                        try? await Task.sleep(nanoseconds: 10_000_000) // 0.01秒
+                    }
+
+                    adaptor.append(annotatedBuffer, withPresentationTime: presentationTime)
+                }
+
+                frameIndex += 1
+            }
+        }
+
+        // 完成写入
+        writerInput.markAsFinished()
+        await writer.finishWriting()
+
+        if reader.status == .failed, let error = reader.error {
+            throw VideoError.exportFailedWithReason("读取视频失败: \(error.localizedDescription)")
+        }
+
+        if writer.status == .failed, let error = writer.error {
+            throw VideoError.exportFailedWithReason("写入视频失败: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - 辅助方法
@@ -205,12 +542,19 @@ class VideoProcessingService {
             self.currentOperation = operation
         }
     }
+
+    private func makeExportFileName(for video: Video, exportName: String, index: Int) -> String {
+        let titleComponent = video.title.sanitizedFileComponent(fallback: "video")
+        let exportComponent = exportName.sanitizedFileComponent(fallback: "export")
+        return "\(titleComponent)_\(exportComponent)_\(index).mp4"
+    }
 }
 
 // MARK: - 错误类型
 enum VideoError: LocalizedError {
     case noVideoTrack
     case exportFailed
+    case exportFailedWithReason(String)
     case analysisFailed
 
     var errorDescription: String? {
@@ -219,6 +563,8 @@ enum VideoError: LocalizedError {
             return "无法找到视频轨道"
         case .exportFailed:
             return "视频导出失败"
+        case .exportFailedWithReason(let reason):
+            return "视频导出失败: \(reason)"
         case .analysisFailed:
             return "视频分析失败"
         }

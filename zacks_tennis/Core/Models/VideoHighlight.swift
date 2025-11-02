@@ -49,6 +49,9 @@ final class VideoHighlight {
     /// 检测元数据（JSON 字符串）
     var metadataJSON: String?
 
+    /// 网球轨迹数据（JSON 字符串）
+    var ballTrajectoryDataJSON: String?
+
     /// 创建时间
     var createdAt: Date
 
@@ -104,7 +107,9 @@ extension VideoHighlight {
 
     /// 视频 URL
     var videoURL: URL {
-        URL(fileURLWithPath: videoFilePath)
+        FileManager.default
+            .urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(videoFilePath)
     }
 }
 
@@ -128,9 +133,40 @@ struct DetectionMetadata: Codable {
 
     /// 检测到的球员数量
     var playerCount: Int?
+    
+    /// 音频峰值时间点列表（击球声的时间戳，相对于视频开始时间）
+    var audioPeakTimestamps: [Double]?
+    
+    init(
+        maxMovementIntensity: Double = 0.0,
+        avgMovementIntensity: Double = 0.0,
+        hasAudioPeaks: Bool = false,
+        poseConfidenceAvg: Double = 0.0,
+        estimatedHitCount: Int? = nil,
+        playerCount: Int? = nil,
+        audioPeakTimestamps: [Double]? = nil
+    ) {
+        self.maxMovementIntensity = maxMovementIntensity
+        self.avgMovementIntensity = avgMovementIntensity
+        self.hasAudioPeaks = hasAudioPeaks
+        self.poseConfidenceAvg = poseConfidenceAvg
+        self.estimatedHitCount = estimatedHitCount
+        self.playerCount = playerCount
+        self.audioPeakTimestamps = audioPeakTimestamps
+    }
 }
 
 extension VideoHighlight {
+    /// 获取音频峰值时间点（相对于回合开始时间）
+    var audioPeakTimestamps: [Double] {
+        guard let metadata = self.metadata,
+              let timestamps = metadata.audioPeakTimestamps else {
+            return []
+        }
+        // 返回相对于回合开始时间的时间戳
+        return timestamps.map { $0 - self.startTime }
+    }
+    
     /// 获取检测元数据
     var metadata: DetectionMetadata? {
         get {
@@ -148,6 +184,23 @@ extension VideoHighlight {
         }
     }
 
+    /// 获取网球轨迹数据
+    var ballTrajectoryData: BallTrajectoryData? {
+        get {
+            guard let json = ballTrajectoryDataJSON,
+                  let data = json.data(using: .utf8) else {
+                return nil
+            }
+            return try? JSONDecoder().decode(BallTrajectoryData.self, from: data)
+        }
+        set {
+            if let data = try? JSONEncoder().encode(newValue),
+               let json = String(data: data, encoding: .utf8) {
+                ballTrajectoryDataJSON = json
+            }
+        }
+    }
+
     /// 转换为 Rally 结构（用于状态保存）
     func toRally() -> Rally {
         var rally = Rally(startTime: self.startTime)
@@ -156,6 +209,11 @@ extension VideoHighlight {
         // 使用现有的 metadata 或创建默认值
         if let metadata = self.metadata {
             rally.metadata = metadata
+        }
+
+        // 添加网球轨迹数据
+        if let ballTrajectory = self.ballTrajectoryData {
+            rally.ballTrajectory = ballTrajectory
         }
 
         return rally
