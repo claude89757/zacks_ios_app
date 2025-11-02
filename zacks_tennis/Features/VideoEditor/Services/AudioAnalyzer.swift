@@ -185,12 +185,12 @@ actor AudioAnalyzer: AudioAnalyzing {
         // 2. 计算峰值功率（改进：使用滑动窗口检测瞬时峰值）
         let peakAmplitude = calculatePeakAmplitudeImproved(samples: floatSamples)
 
-        // 3. 判断是否是显著峰值（优化：降低阈值）
-        // 如果峰值幅度足够高，即使低于阈值也考虑（降低误检率）
+        // 3. 判断是否是显著峰值（收紧条件，减少误报）
+        // 如果峰值幅度足够高，才认为是显著峰值
         let isPeak = peakAmplitude > config.peakThreshold
         
-        // 优化：即使峰值略低于阈值，如果RMS足够高，也认为是潜在峰值
-        let isPotentialPeak = peakAmplitude > config.peakThreshold * 0.7 && rms > 0.15
+        // 收紧条件：只有峰值幅度较高且RMS也较高时，才认为是潜在峰值
+        let isPotentialPeak = peakAmplitude > config.peakThreshold * 0.85 && rms > 0.2
         
         guard isPeak || isPotentialPeak else { return nil }
 
@@ -214,8 +214,9 @@ actor AudioAnalyzer: AudioAnalyzing {
         let preciseTimestamp = findPrecisePeakTime(samples: floatSamples, baseTimestamp: timestamp, sampleRate: sampleRate)
 
         // 8. 只返回置信度足够高的峰值
-        // 优化：对于明显的峰值（幅度高），即使置信度略低也返回
-        let confidenceThreshold = peakAmplitude > 0.4 ? config.minimumConfidence * 0.8 : config.minimumConfidence
+        // 收紧条件：提高置信度阈值，减少误报
+        // 对于明显的峰值（幅度很高），可以稍微放宽置信度要求
+        let confidenceThreshold = peakAmplitude > 0.5 ? config.minimumConfidence * 0.9 : config.minimumConfidence
         
         if confidence >= confidenceThreshold {
             return AudioPeak(
@@ -658,8 +659,9 @@ actor AudioAnalyzer: AudioAnalyzing {
                 let timeDiff = abs(peak.time - current.time)
                 
                 if timeDiff < config.minimumPeakInterval {
-                    // 如果两个峰值都很高，可能是连续击球，都保留
-                    if peak.confidence > 0.6 && current.confidence > 0.6 && timeDiff > 0.08 {
+                    // 如果两个峰值都很高（都是明显的击球声），且间隔合理，都保留
+                    // 收紧条件：需要更高的置信度才认为是连续击球
+                    if peak.confidence > 0.65 && current.confidence > 0.65 && timeDiff > 0.12 {
                         // 连续击球，都保留
                         filtered.append(current)
                         currentPeak = peak
@@ -701,11 +703,11 @@ struct AudioAnalysisConfiguration {
     /// 最小峰值间隔（秒）- 太近的峰值会被合并
     let minimumPeakInterval: Double
 
-    /// 默认配置（优化：大幅提高召回率）
+    /// 默认配置（平衡准确率和召回率）
     static let `default` = AudioAnalysisConfiguration(
-        peakThreshold: 0.15,  // 大幅降低阈值（原来0.25）
-        minimumConfidence: 0.35,  // 降低置信度阈值（原来0.45）
-        minimumPeakInterval: 0.12  // 允许更密集的峰值检测（原来0.15）
+        peakThreshold: 0.25,  // 提高阈值，减少误报（原来0.15）
+        minimumConfidence: 0.5,  // 提高置信度阈值，过滤低质量峰值（原来0.35）
+        minimumPeakInterval: 0.18  // 增加最小间隔，避免过于密集的误识别（原来0.12）
     )
 
     /// 严格配置（减少误报）

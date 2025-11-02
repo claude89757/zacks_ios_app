@@ -153,10 +153,10 @@ actor RallyDetectionEngine {
                         print("   - 时长: \(String(format: "%.2f", rally.duration))s (要求: >= \(config.minRallyDuration)s)")
                         print("   - 击球数: \(cluster.count) (要求: >= \(config.minHitCount))")
                         if !intervals.isEmpty {
-                            print("   - 平均间隔: \(String(format: "%.2f", avgInterval))s (要求: 0.2-3.0s)")
+                            print("   - 平均间隔: \(String(format: "%.2f", avgInterval))s (要求: 0.2-7.0s)")
                             print("   - 最大间隔: \(String(format: "%.2f", intervals.max() ?? 0))s")
                         }
-                        print("   - 击球密度: \(String(format: "%.2f", hitDensity)) (要求: >= 0.33)")
+                        print("   - 击球密度: \(String(format: "%.2f", hitDensity)) (要求: >= 0.20)")
                     }
                 }
             } else {
@@ -170,7 +170,14 @@ actor RallyDetectionEngine {
             print("🎾 [RallyDetection] 最终检测到 \(rallies.count) 个有效回合")
         }
 
-        return rallies
+        // 合并相邻的短回合
+        let mergedRallies = mergeAdjacentRallies(rallies)
+        
+        if debugLogging && mergedRallies.count != rallies.count {
+            print("🔗 [RallyDetection] 合并后: \(mergedRallies.count) 个回合（合并了 \(rallies.count - mergedRallies.count) 个相邻回合）")
+        }
+
+        return mergedRallies
     }
 
     /// 计算自适应阈值（根据音频质量动态调整）
@@ -207,10 +214,11 @@ actor RallyDetectionEngine {
             let previousPeak = peaks[i-1]
             let timeInterval = currentPeak.time - previousPeak.time
             
-            // 动态间隔判断：根据击球间隔是否合理
+            // 动态间隔判断：根据当前簇的状态和击球间隔是否合理
             let shouldCluster = shouldClusterPeaks(
                 previous: previousPeak,
                 current: currentPeak,
+                currentCluster: currentCluster,
                 defaultInterval: config.maxHitInterval
             )
             
@@ -230,34 +238,165 @@ actor RallyDetectionEngine {
             clusters.append(currentCluster)
         }
         
-        return clusters
+        // 回溯合并：检查相邻簇是否可以合并
+        return mergeAdjacentClusters(clusters)
     }
 
     /// 判断两个峰值是否应该聚为一簇
+    /// - Parameters:
+    ///   - previous: 前一个峰值
+    ///   - current: 当前峰值
+    ///   - currentCluster: 当前簇中的所有峰值（用于判断簇的状态）
+    ///   - defaultInterval: 默认间隔阈值
     private func shouldClusterPeaks(
         previous: AudioPeak,
         current: AudioPeak,
+        currentCluster: [AudioPeak],
         defaultInterval: Double
     ) -> Bool {
         let timeInterval = current.time - previous.time
-        
-        // 基本间隔检查
-        if timeInterval > defaultInterval {
-            return false
-        }
         
         // 如果间隔很短（<0.3秒），可能是同一击球的不同峰值，应该合并
         if timeInterval < 0.3 {
             return true
         }
         
-        // 如果两个峰值置信度都很高，且间隔合理，应该聚为一簇
+        // 回合边界判断：间隔超过12秒，认为是真正的回合结束
+        // 根据调研，网球回合平均时长5-10秒，回合之间的间隔通常在10秒以上
+        let rallyBoundaryThreshold = 12.0
+        if timeInterval > rallyBoundaryThreshold {
+            return false
+        }
+        
+        // 动态间隔判断：根据当前簇的状态调整阈值
+        let clusterHitCount = currentCluster.count
+        let clusterDuration = currentCluster.isEmpty ? 0.0 : 
+            (currentCluster.last!.time - currentCluster.first!.time)
+        
+        // 如果当前簇已经有足够的击球（>= 4个），说明回合在进行中
+        // 允许稍长的间隔（适应发球准备、换边等），但不超过8秒
+        if clusterHitCount >= 4 {
+            // 回合进行中，允许更长的间隔，但有限制
+            let rallyInProgressInterval = min(defaultInterval * 1.15, 7.0)  // 最多7秒
+            if timeInterval <= rallyInProgressInterval {
+                return true
+            }
+        } else {
+            // 簇刚开始形成，使用标准间隔阈值
+            // 允许稍微长一点的间隔以适应发球准备
+            let startInterval = min(defaultInterval * 1.1, 6.0)  // 最多6秒
+            if timeInterval <= startInterval {
+                return true
+            }
+        }
+        
+        // 如果两个峰值置信度都很高，且间隔在合理范围内，应该聚为一簇
         if previous.confidence > 0.7 && current.confidence > 0.7 {
-            return timeInterval <= defaultInterval * 1.2
+            return timeInterval <= defaultInterval * 1.1
         }
         
         // 默认使用配置的间隔
         return timeInterval <= defaultInterval
+    }
+    
+    /// 合并相邻的回合（如果它们实际上属于同一个回合）
+    private func mergeAdjacentRallies(_ rallies: [Rally]) -> [Rally] {
+        guard rallies.count > 1 else { return rallies }
+        
+        var mergedRallies: [Rally] = []
+        var i = 0
+        
+        while i < rallies.count {
+            var currentRally = rallies[i]
+            
+            // 检查是否可以与下一个回合合并
+            while i + 1 < rallies.count {
+                let nextRally = rallies[i + 1]
+                
+                // 检查两个回合之间的间隔
+                let gapInterval = nextRally.startTime - currentRally.endTime
+                
+                // 更严格的合并条件：间隔很短（< 2秒），且其中一个回合很短（< 5秒）
+                // 避免过度合并导致回合过长
+                let shouldMerge = gapInterval < 2.0 && 
+                                 (currentRally.duration < 5.0 || nextRally.duration < 5.0)
+                
+                if shouldMerge {
+                    // 合并回合：使用更早的开始时间和更晚的结束时间
+                    let mergedStartTime = min(currentRally.startTime, nextRally.startTime)
+                    let mergedEndTime = max(currentRally.endTime, nextRally.endTime)
+                    
+                    // 创建合并后的回合
+                    var mergedRally = Rally(startTime: mergedStartTime)
+                    mergedRally.endTime = mergedEndTime
+                    
+                    // 合并元数据（使用平均值或更优值）
+                    let mergedMetadata = DetectionMetadata(
+                        maxMovementIntensity: max(currentRally.metadata.maxMovementIntensity, nextRally.metadata.maxMovementIntensity),
+                        avgMovementIntensity: (currentRally.metadata.avgMovementIntensity + nextRally.metadata.avgMovementIntensity) / 2.0,
+                        hasAudioPeaks: currentRally.metadata.hasAudioPeaks || nextRally.metadata.hasAudioPeaks,
+                        poseConfidenceAvg: (currentRally.metadata.poseConfidenceAvg + nextRally.metadata.poseConfidenceAvg) / 2.0,
+                        estimatedHitCount: (currentRally.metadata.estimatedHitCount ?? 0) + (nextRally.metadata.estimatedHitCount ?? 0),
+                        playerCount: currentRally.metadata.playerCount ?? nextRally.metadata.playerCount,
+                        audioPeakTimestamps: (currentRally.metadata.audioPeakTimestamps ?? []) + (nextRally.metadata.audioPeakTimestamps ?? [])
+                    )
+                    mergedRally.metadata = mergedMetadata
+                    
+                    currentRally = mergedRally
+                    i += 1
+                    continue
+                }
+                
+                break
+            }
+            
+            mergedRallies.append(currentRally)
+            i += 1
+        }
+        
+        return mergedRallies
+    }
+
+    /// 合并相邻的簇（如果它们实际上属于同一个回合）
+    private func mergeAdjacentClusters(_ clusters: [[AudioPeak]]) -> [[AudioPeak]] {
+        guard clusters.count > 1 else { return clusters }
+        
+        var mergedClusters: [[AudioPeak]] = []
+        var i = 0
+        
+        while i < clusters.count {
+            var currentCluster = clusters[i]
+            
+            // 检查是否可以与下一个簇合并
+            while i + 1 < clusters.count {
+                let nextCluster = clusters[i + 1]
+                
+                // 检查两个簇之间的间隔
+                if let lastPeak = currentCluster.last, let firstPeak = nextCluster.first {
+                    let gapInterval = firstPeak.time - lastPeak.time
+                    
+                    // 更严格的合并条件：间隔很短（< 8秒），且其中一个簇很短（< 4个击球）
+                    // 避免过度合并导致回合过长
+                    let shouldMerge = gapInterval < 8.0 && 
+                                     (currentCluster.count < 4 || nextCluster.count < 4) &&
+                                     gapInterval < 12.0  // 确保不会合并间隔过长的簇
+                    
+                    if shouldMerge {
+                        // 合并簇
+                        currentCluster.append(contentsOf: nextCluster)
+                        i += 1
+                        continue
+                    }
+                }
+                
+                break
+            }
+            
+            mergedClusters.append(currentCluster)
+            i += 1
+        }
+        
+        return mergedClusters
     }
 
     /// 简单聚类（降级方案）
@@ -291,26 +430,26 @@ actor RallyDetectionEngine {
         // 2. 击球次数检查
         guard cluster.count >= config.minHitCount else { return false }
         
-        // 3. 击球间隔合理性检查
+        // 3. 击球间隔合理性检查（放宽范围以适应更长的间隔）
         if cluster.count > 1 {
             let intervals = zip(cluster.dropFirst(), cluster).map { $0.time - $1.time }
             let avgInterval = intervals.reduce(0, +) / Double(intervals.count)
             
-            // 平均击球间隔应该在合理范围内（0.2秒到3.0秒，放宽范围）
-            guard avgInterval >= 0.2 && avgInterval <= 3.0 else { return false }
+            // 平均击球间隔应该在合理范围内（0.2秒到7秒，适应回合内的正常暂停）
+            guard avgInterval >= 0.2 && avgInterval <= 7.0 else { return false }
             
             // 检查是否有异常长的间隔（可能是误检）
-            // 放宽条件：允许有1个间隔超过阈值（可能是回合中的暂停）
-            let longIntervals = intervals.filter { $0 > config.maxHitInterval * 2 }
-            if longIntervals.count > 1 {
+            // 放宽条件：允许有1-2个间隔超过阈值（可能是回合中的暂停）
+            let longIntervals = intervals.filter { $0 > config.maxHitInterval * 1.3 }
+            if longIntervals.count > 2 {
                 return false
             }
         }
         
         // 4. 击球密度检查（回合内击球应该相对密集）
-        // 放宽条件：至少每3秒一次击球（而不是每2秒）
+        // 至少每5秒一次击球，适应更长的间隔
         let hitDensity = Double(cluster.count) / rally.duration
-        guard hitDensity >= 0.33 else { return false } // 至少每3秒一次击球
+        guard hitDensity >= 0.2 else { return false } // 至少每5秒一次击球
         
         return true
     }
@@ -319,8 +458,28 @@ actor RallyDetectionEngine {
         guard let first = cluster.first, let last = cluster.last else { return nil }
         guard cluster.count >= config.minHitCount else { return nil }
 
-        let startTime = max(0.0, first.time - config.preHitPadding)
-        let endTime = last.time + config.postHitPadding
+        // 计算回合的实际时长（从第一个击球到最后一个击球）
+        let rallyDuration = last.time - first.time
+        
+        // 根据回合时长动态调整padding
+        let (prePadding, postPadding): (Double, Double)
+        
+        if rallyDuration < 5.0 {
+            // 短回合（< 5秒）：使用较小的padding
+            prePadding = config.preHitPadding * 0.9  // 1.35秒
+            postPadding = config.postHitPadding * 0.9  // 1.62秒
+        } else if rallyDuration > 12.0 {
+            // 长回合（> 12秒）：使用较大的padding以保留更多内容
+            prePadding = config.preHitPadding * 1.1  // 1.65秒
+            postPadding = config.postHitPadding * 1.1  // 1.98秒
+        } else {
+            // 中等回合（5-12秒）：使用标准padding
+            prePadding = config.preHitPadding  // 1.5秒
+            postPadding = config.postHitPadding  // 1.8秒
+        }
+        
+        let startTime = max(0.0, first.time - prePadding)
+        let endTime = last.time + postPadding
 
         guard endTime - startTime >= config.minRallyDuration else { return nil }
 
@@ -642,11 +801,11 @@ struct RallyDetectionConfiguration {
     /// 默认配置：综合场景下的折中方案
     static let `default` = RallyDetectionConfiguration(
         minRallyDuration: 3.0,
-        audioConfidenceThreshold: 0.6,
-        maxHitInterval: 1.8,
+        audioConfidenceThreshold: 0.65,  // 提高置信度阈值，过滤低质量峰值（原来0.6）
+        maxHitInterval: 5.5,  // 回合内正常击球间隔上限（5-6秒，适应发球准备等）
         minHitCount: 4,
-        preHitPadding: 0.6,
-        postHitPadding: 1.0,
+        preHitPadding: 1.5,   // 保留发球/准备动作（1.5秒）
+        postHitPadding: 1.8,  // 保留击球后的完整动作（1.8秒）
         enableDebugLogging: false
     )
 
@@ -654,10 +813,10 @@ struct RallyDetectionConfiguration {
     static let strict = RallyDetectionConfiguration(
         minRallyDuration: 3.5,
         audioConfidenceThreshold: 0.7,
-        maxHitInterval: 1.3,
+        maxHitInterval: 4.5,  // 更严格的间隔
         minHitCount: 5,
-        preHitPadding: 0.5,
-        postHitPadding: 0.8,
+        preHitPadding: 1.3,
+        postHitPadding: 1.5,
         enableDebugLogging: false
     )
 
@@ -665,21 +824,21 @@ struct RallyDetectionConfiguration {
     static let lenient = RallyDetectionConfiguration(
         minRallyDuration: 2.0,
         audioConfidenceThreshold: 0.5,
-        maxHitInterval: 2.2,
+        maxHitInterval: 7.0,  // 允许更长的间隔（适应慢节奏比赛）
         minHitCount: 3,
-        preHitPadding: 0.7,
-        postHitPadding: 1.2,
+        preHitPadding: 1.8,
+        postHitPadding: 2.2,
         enableDebugLogging: false
     )
 
     /// 调试配置：启用详细日志
     static let debug = RallyDetectionConfiguration(
         minRallyDuration: 3.0,
-        audioConfidenceThreshold: 0.6,
-        maxHitInterval: 1.8,
+        audioConfidenceThreshold: 0.65,  // 与default保持一致
+        maxHitInterval: 5.5,  // 与default保持一致
         minHitCount: 4,
-        preHitPadding: 0.6,
-        postHitPadding: 1.0,
+        preHitPadding: 1.5,
+        postHitPadding: 1.8,
         enableDebugLogging: true
     )
 }
