@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(open \"macappstore://apps.apple.com/app/xcode/id497799835\")",
+      "Bash(xcodebuild:*)",
+      "mcp__XcodeBuildMCP__build_run_sim",
+      "mcp__XcodeBuildMCP__open_sim",
+      "mcp__XcodeBuildMCP__start_sim_log_cap",
+      "mcp__XcodeBuildMCP__screenshot",
+      "mcp__XcodeBuildMCP__describe_ui",
+      "mcp__XcodeBuildMCP__tap",
+      "mcp__XcodeBuildMCP__stop_sim_log_cap",
+      "Bash(find:*)",
+      "Bash(xcrun simctl:*)",
+      "Bash(plutil:*)",
+      "mcp__XcodeBuildMCP__build_device",
+      "mcp__XcodeBuildMCP__get_device_app_path",
+      "mcp__XcodeBuildMCP__get_app_bundle_id",
+      "mcp__XcodeBuildMCP__install_app_device",
+      "mcp__XcodeBuildMCP__list_schemes",
+      "mcp__XcodeBuildMCP__list_devices",
+      "mcp__XcodeBuildMCP__start_device_log_cap"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
