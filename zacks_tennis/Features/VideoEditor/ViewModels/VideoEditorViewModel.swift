@@ -399,6 +399,98 @@ class VideoEditorViewModel {
         isExporting = false
     }
 
+    /// 导出最长的 N 个回合
+    func exportLongestHighlights(from video: Video, count: Int) async {
+        // 🔥 并发控制：如果有任务在进行，则拒绝新导出
+        guard canStartNewTask else {
+            errorMessage = busyStatusMessage ?? "当前有任务正在进行，请稍候"
+            showError = true
+            return
+        }
+
+        let longestHighlights = video.getLongestHighlights(count: count)
+        guard !longestHighlights.isEmpty else {
+            errorMessage = "没有可导出的回合"
+            showError = true
+            return
+        }
+
+        isExporting = true
+        currentOperation = "正在导出最长的 \(count) 个回合..."
+
+        do {
+            let exportedFiles = try await VideoProcessingService.shared.exportCustomHighlights(
+                from: video,
+                highlights: longestHighlights,
+                exportName: "longest\(count)"
+            )
+
+            // 保存导出记录
+            for file in exportedFiles {
+                video.addExportedFile(file)
+            }
+
+            try modelContext?.save()
+            loadVideos()
+
+            currentOperation = "导出完成！"
+
+            // 保存到相册（可选）
+            await saveToPhotoLibrary(files: exportedFiles)
+
+        } catch {
+            handleError(error)
+        }
+
+        isExporting = false
+    }
+
+    /// 导出收藏的回合
+    func exportFavoriteHighlights(from video: Video) async {
+        // 🔥 并发控制：如果有任务在进行，则拒绝新导出
+        guard canStartNewTask else {
+            errorMessage = busyStatusMessage ?? "当前有任务正在进行，请稍候"
+            showError = true
+            return
+        }
+
+        let favorites = video.favoriteHighlights
+        guard !favorites.isEmpty else {
+            errorMessage = "没有收藏的回合"
+            showError = true
+            return
+        }
+
+        isExporting = true
+        currentOperation = "正在导出 \(favorites.count) 个收藏回合..."
+
+        do {
+            let exportedFiles = try await VideoProcessingService.shared.exportCustomHighlights(
+                from: video,
+                highlights: favorites,
+                exportName: "favorites"
+            )
+
+            // 保存导出记录
+            for file in exportedFiles {
+                video.addExportedFile(file)
+            }
+
+            try modelContext?.save()
+            loadVideos()
+
+            currentOperation = "导出完成！"
+
+            // 保存到相册（可选）
+            await saveToPhotoLibrary(files: exportedFiles)
+
+        } catch {
+            handleError(error)
+        }
+
+        isExporting = false
+    }
+
     // MARK: - Video Management
 
     /// 删除视频

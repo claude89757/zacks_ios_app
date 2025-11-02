@@ -20,21 +20,22 @@ struct VideoDetailViewRedesigned: View {
     @State private var showExportOptions = false
     @State private var showDeleteAlert = false
 
+    // 选择模式状态
+    @State private var isSelecting = false
+    @State private var selectedRallies: Set<VideoHighlight.ID> = []
+    @State private var showBatchDeleteAlert = false
+
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
-                // 1. 概览数据统计（4宫格）
-                OverviewStatsSection(video: video)
-
-                Divider()
-                    .padding(.horizontal)
-
-                // 2. 回合网格（3列布局）
+                // 回合网格（3列布局）
                 RallyGridSection(
                     rallies: video.highlights,
                     video: video,
                     selectedRally: $selectedRally,
-                    showPlayer: $showRallyPlayer
+                    showPlayer: $showRallyPlayer,
+                    isSelecting: $isSelecting,
+                    selectedRallies: $selectedRallies
                 )
 
                 // 底部留白（为固定导出栏留空间）
@@ -46,39 +47,86 @@ struct VideoDetailViewRedesigned: View {
         .navigationTitle(video.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button {
-                        // 编辑视频标题
-                    } label: {
-                        Label("编辑标题", systemImage: "pencil")
+            // 选择模式：左侧显示"取消"按钮
+            if isSelecting {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("取消") {
+                        withAnimation {
+                            exitSelectionMode()
+                        }
                     }
+                }
+            }
 
-                    Button {
-                        // 查看分析详情
-                    } label: {
-                        Label("分析详情", systemImage: "chart.bar")
+            // 选择模式：右侧显示"全选/取消全选"按钮
+            if isSelecting {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(selectedRallies.count == video.highlights.count ? "取消全选" : "全选") {
+                        toggleSelectAll()
                     }
+                }
+            }
+            // 非选择模式：右侧显示菜单
+            else {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button {
+                            withAnimation {
+                                isSelecting = true
+                            }
+                        } label: {
+                            Label("选择", systemImage: "checkmark.circle")
+                        }
 
-                    Divider()
+                        Divider()
 
-                    Button(role: .destructive) {
-                        showDeleteAlert = true
+                        Button {
+                            // 编辑视频标题
+                        } label: {
+                            Label("编辑标题", systemImage: "pencil")
+                        }
+
+                        Button {
+                            // 查看分析详情
+                        } label: {
+                            Label("分析详情", systemImage: "chart.bar")
+                        }
+
+                        Divider()
+
+                        Button(role: .destructive) {
+                            showDeleteAlert = true
+                        } label: {
+                            Label("删除视频", systemImage: "trash")
+                        }
                     } label: {
-                        Label("删除视频", systemImage: "trash")
+                        Image(systemName: "ellipsis.circle")
                     }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
                 }
             }
         }
-        // 固定底部导出栏
+        // 固定底部工具栏
         .safeAreaInset(edge: .bottom) {
-            ExportActionsBar(
-                video: video,
-                viewModel: viewModel,
-                showExportOptions: $showExportOptions
-            )
+            if isSelecting {
+                // 选择模式：显示选择工具栏
+                SelectionToolbar(
+                    selectedCount: selectedRallies.count,
+                    allSelected: selectedRallies.count == video.highlights.count,
+                    onDelete: {
+                        showBatchDeleteAlert = true
+                    },
+                    onToggleFavorite: {
+                        batchToggleFavorite()
+                    }
+                )
+            } else {
+                // 正常模式：显示导出栏
+                ExportActionsBar(
+                    video: video,
+                    viewModel: viewModel,
+                    showExportOptions: $showExportOptions
+                )
+            }
         }
         // 全屏播放器
         .fullScreenCover(isPresented: $showRallyPlayer) {
@@ -92,13 +140,12 @@ struct VideoDetailViewRedesigned: View {
         }
         // 导出选项页
         .sheet(isPresented: $showExportOptions) {
-            ExportOptionsView(
+            SimplifiedExportSheet(
                 video: video,
-                rallies: video.highlights,
                 viewModel: viewModel
             )
         }
-        // 删除确认
+        // 删除视频确认
         .alert("删除视频", isPresented: $showDeleteAlert) {
             Button("取消", role: .cancel) { }
             Button("删除", role: .destructive) {
@@ -106,6 +153,15 @@ struct VideoDetailViewRedesigned: View {
             }
         } message: {
             Text("确定要删除这个视频吗？此操作不可撤销。")
+        }
+        // 批量删除确认
+        .alert("删除回合", isPresented: $showBatchDeleteAlert) {
+            Button("取消", role: .cancel) { }
+            Button("删除", role: .destructive) {
+                batchDelete()
+            }
+        } message: {
+            Text("确定要删除选中的 \(selectedRallies.count) 个回合吗？此操作不可撤销。")
         }
     }
 
@@ -115,6 +171,51 @@ struct VideoDetailViewRedesigned: View {
         modelContext.delete(video)
         try? modelContext.save()
         dismiss()
+    }
+
+    // MARK: - Selection Mode Actions
+
+    /// 退出选择模式
+    private func exitSelectionMode() {
+        isSelecting = false
+        selectedRallies.removeAll()
+    }
+
+    /// 全选/取消全选
+    private func toggleSelectAll() {
+        if selectedRallies.count == video.highlights.count {
+            // 当前全选，执行取消全选
+            selectedRallies.removeAll()
+        } else {
+            // 执行全选
+            selectedRallies = Set(video.highlights.map { $0.id })
+        }
+    }
+
+    /// 批量删除
+    private func batchDelete() {
+        let ralliesToDelete = video.highlights.filter { selectedRallies.contains($0.id) }
+
+        for rally in ralliesToDelete {
+            modelContext.delete(rally)
+        }
+
+        try? modelContext.save()
+        exitSelectionMode()
+    }
+
+    /// 批量切换收藏状态
+    private func batchToggleFavorite() {
+        let selectedHighlights = video.highlights.filter { selectedRallies.contains($0.id) }
+
+        // 如果所有选中项都已收藏，则取消收藏；否则全部收藏
+        let allFavorited = selectedHighlights.allSatisfy { $0.isFavorite }
+
+        for highlight in selectedHighlights {
+            highlight.isFavorite = !allFavorited
+        }
+
+        try? modelContext.save()
     }
 }
 

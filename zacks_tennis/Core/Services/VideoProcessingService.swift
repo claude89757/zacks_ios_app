@@ -96,6 +96,32 @@ class VideoProcessingService {
         return exportedFiles
     }
 
+    /// 导出自定义精彩片段列表
+    func exportCustomHighlights(from video: Video, highlights: [VideoHighlight], exportName: String) async throws -> [ExportedFile] {
+        isProcessing = true
+        processingProgress = 0.0
+        currentOperation = "正在导出自定义片段..."
+        defer { isProcessing = false }
+
+        var exportedFiles: [ExportedFile] = []
+
+        for (index, highlight) in highlights.enumerated() {
+            let progress = Double(index) / Double(highlights.count)
+            await updateProgress(progress, operation: "导出片段 \(index + 1)/\(highlights.count)")
+
+            let exportedFile = try await exportHighlight(
+                from: video,
+                highlight: highlight,
+                fileName: "\(video.title)_\(exportName)_\(index + 1).mp4"
+            )
+            exportedFiles.append(exportedFile)
+        }
+
+        await updateProgress(1.0, operation: "导出完成")
+
+        return exportedFiles
+    }
+
     /// 导出单个精彩片段
     private func exportHighlight(from video: Video, highlight: VideoHighlight, fileName: String) async throws -> ExportedFile {
         let videoURL = getVideoURL(for: video)

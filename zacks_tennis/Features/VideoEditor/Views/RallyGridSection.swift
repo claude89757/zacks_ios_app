@@ -13,8 +13,19 @@ struct RallyGridSection: View {
     let video: Video
     @Binding var selectedRally: VideoHighlight?
     @Binding var showPlayer: Bool
+    @Binding var isSelecting: Bool
+    @Binding var selectedRallies: Set<VideoHighlight.ID>
 
     @State private var thumbnails: [UUID: UIImage] = [:]
+
+    // 捏合手势缩放（网格列数）
+    @AppStorage("rallyGridColumnCount") private var columnCount = 3
+    @GestureState private var magnificationScale: CGFloat = 1.0
+
+    /// 动态列配置
+    private var gridColumns: [GridItem] {
+        Array(repeating: GridItem(.flexible(), spacing: 8), count: columnCount)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -30,29 +41,45 @@ struct RallyGridSection: View {
                     .foregroundColor(.secondary)
             }
 
-            // 3列网格
+            // 动态网格（支持捏合缩放）
             if rallies.isEmpty {
                 emptyStateView
             } else {
-                LazyVGrid(
-                    columns: [
-                        GridItem(.flexible(), spacing: 8),
-                        GridItem(.flexible(), spacing: 8),
-                        GridItem(.flexible(), spacing: 8)
-                    ],
-                    spacing: 8
-                ) {
+                LazyVGrid(columns: gridColumns, spacing: 8) {
                     ForEach(rallies) { rally in
                         RallyGridCard(
                             rally: rally,
-                            thumbnail: thumbnails[rally.id]
+                            thumbnail: thumbnails[rally.id],
+                            isSelecting: isSelecting,
+                            isSelected: selectedRallies.contains(rally.id)
                         )
                         .onTapGesture {
-                            selectedRally = rally
-                            showPlayer = true
+                            if isSelecting {
+                                toggleSelection(rally.id)
+                            } else {
+                                selectedRally = rally
+                                showPlayer = true
+                            }
                         }
                     }
                 }
+                .gesture(
+                    MagnificationGesture()
+                        .updating($magnificationScale) { value, state, _ in
+                            state = value
+                        }
+                        .onEnded { scale in
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                                if scale > 1.2 {
+                                    // 放大手势 → 减少列数（最少2列）
+                                    columnCount = max(2, columnCount - 1)
+                                } else if scale < 0.8 {
+                                    // 缩小手势 → 增加列数（最多4列）
+                                    columnCount = min(4, columnCount + 1)
+                                }
+                            }
+                        }
+                )
             }
         }
         .task {
@@ -118,6 +145,17 @@ struct RallyGridSection: View {
 
         return UIImage(data: data)
     }
+
+    // MARK: - Selection Actions
+
+    /// 切换选中状态
+    private func toggleSelection(_ id: VideoHighlight.ID) {
+        if selectedRallies.contains(id) {
+            selectedRallies.remove(id)
+        } else {
+            selectedRallies.insert(id)
+        }
+    }
 }
 
 // MARK: - Rally Grid Card
@@ -126,6 +164,8 @@ struct RallyGridSection: View {
 struct RallyGridCard: View {
     let rally: VideoHighlight
     let thumbnail: UIImage?
+    var isSelecting: Bool = false
+    var isSelected: Bool = false
 
     var body: some View {
         ZStack {
@@ -152,11 +192,23 @@ struct RallyGridCard: View {
 
             // 信息叠加层
             VStack {
-                // 顶部：收藏标记
+                // 顶部：左侧勾选框 + 右侧收藏标记
                 HStack {
+                    // 左侧：勾选框（选择模式）
+                    if isSelecting {
+                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                            .font(.title3)
+                            .foregroundColor(isSelected ? .blue : .white)
+                            .padding(6)
+                            .background(isSelected ? Color.white : Color.black.opacity(0.3))
+                            .clipShape(Circle())
+                            .padding(4)
+                    }
+
                     Spacer()
 
-                    if rally.isFavorite {
+                    // 右侧：收藏标记
+                    if rally.isFavorite && !isSelecting {
                         Image(systemName: "heart.fill")
                             .font(.caption)
                             .foregroundColor(.red)
@@ -197,6 +249,10 @@ struct RallyGridCard: View {
             }
         }
         .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(isSelected ? Color.blue : Color.clear, lineWidth: 3)
+        )
         .clipped()
     }
 }
@@ -229,7 +285,9 @@ struct RallyGridCard: View {
         rallies: sampleRallies,
         video: sampleVideo,
         selectedRally: .constant(nil),
-        showPlayer: .constant(false)
+        showPlayer: .constant(false),
+        isSelecting: .constant(false),
+        selectedRallies: .constant([])
     )
     .padding()
 }

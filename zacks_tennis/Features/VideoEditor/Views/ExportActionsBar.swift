@@ -14,74 +14,28 @@ struct ExportActionsBar: View {
     @Binding var showExportOptions: Bool
 
     var body: some View {
-        HStack(spacing: 12) {
-            // 主按钮：导出精彩片段
-            Button {
-                showExportOptions = true
-            } label: {
-                HStack {
-                    Image(systemName: "square.and.arrow.up")
-                        .font(.body)
+        // 单个导出按钮
+        Button {
+            showExportOptions = true
+        } label: {
+            HStack {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.body)
 
-                    Text("导出精彩片段")
-                        .font(.body)
-                        .fontWeight(.semibold)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 16)
-                .background(Color.green)
-                .foregroundColor(.white)
-                .cornerRadius(12)
+                Text("导出")
+                    .font(.body)
+                    .fontWeight(.semibold)
             }
-
-            // 快捷导出菜单
-            Menu {
-                Button {
-                    quickExportTop(5)
-                } label: {
-                    Label("Top 5 精彩回合", systemImage: "star.fill")
-                }
-
-                Button {
-                    quickExportTop(10)
-                } label: {
-                    Label("Top 10 精彩回合", systemImage: "star.fill")
-                }
-
-                Divider()
-
-                Button {
-                    quickExportAll()
-                } label: {
-                    Label("全部回合", systemImage: "video.stack")
-                }
-            } label: {
-                Image(systemName: "ellipsis.circle.fill")
-                    .font(.title2)
-                    .foregroundColor(.green)
-                    .frame(width: 50, height: 50)
-                    .background(Color(.systemGray6))
-                    .cornerRadius(12)
-            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 16)
+            .background(Color.green)
+            .foregroundColor(.white)
+            .cornerRadius(12)
         }
         .padding(.horizontal)
         .padding(.vertical, 12)
         .background(Color(.systemBackground))
         .shadow(color: Color.black.opacity(0.1), radius: 8, x: 0, y: -2)
-    }
-
-    // MARK: - Quick Export Actions
-
-    private func quickExportTop(_ count: Int) {
-        Task {
-            await viewModel.exportTopHighlights(from: video, count: count)
-        }
-    }
-
-    private func quickExportAll() {
-        Task {
-            await viewModel.exportCustomHighlights(from: video, highlights: video.highlights)
-        }
     }
 }
 
