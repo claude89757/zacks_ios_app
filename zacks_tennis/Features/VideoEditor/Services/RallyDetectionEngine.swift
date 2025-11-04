@@ -211,8 +211,9 @@ actor RallyDetectionEngine {
             print("🎯 [RallyDetection] 动态阈值: 回合边界=\(String(format: "%.2f", intervalStats.rallyBoundaryThreshold))s, 最大击球间隔=\(String(format: "%.2f", intervalStats.maxHitInterval))s")
         }
 
-        // 使用改进的时序聚类（带统计阈值）
-        let clusters = performImprovedTemporalClustering(peaks: filteredPeaks, intervalStats: intervalStats)
+        // 使用贝叶斯引导的时序聚类（Phase 2: 无监督ML）
+        // 结合贝叶斯变化点检测和统计阈值，优化回合边界准确率
+        let clusters = performBayesianGuidedClustering(peaks: filteredPeaks, intervalStats: intervalStats)
         
         if debugLogging {
             print("🔍 [RallyDetection] 时序聚类结果: \(clusters.count) 个簇")
@@ -395,7 +396,88 @@ actor RallyDetectionEngine {
         // 默认使用统计的最大击球间隔
         return timeInterval <= baseInterval
     }
-    
+
+    /// 使用贝叶斯变化点检测进行聚类（混合方法）
+    /// 结合贝叶斯CPD的概率判断和统计阈值，提高回合边界准确率
+    /// - Parameters:
+    ///   - peaks: 音频峰值数组
+    ///   - intervalStats: 间隔统计量
+    /// - Returns: 峰值簇数组
+    private func performBayesianGuidedClustering(
+        peaks: [AudioPeak],
+        intervalStats: IntervalStatistics
+    ) -> [[AudioPeak]] {
+        guard !peaks.isEmpty else { return [] }
+
+        // 1. 使用自适应配置创建贝叶斯检测器
+        let adaptiveConfig = BayesianChangePointDetector.Config.adaptive(
+            intervalStats: convertIntervalStatistics(intervalStats)
+        )
+        let detector = BayesianChangePointDetector(config: adaptiveConfig)
+
+        // 2. 检测变化点
+        let changePoints = detector.detectChangePoints(peaks: peaks)
+
+        if config.enableDebugLogging {
+            let detectedPoints = changePoints.filter { $0.isChangePoint }
+            print("🎯 [BayesianClustering] 贝叶斯CPD检测到 \(detectedPoints.count) 个变化点")
+        }
+
+        // 3. 基于变化点进行分段
+        var clusters: [[AudioPeak]] = []
+        var currentCluster: [AudioPeak] = [peaks[0]]
+
+        for i in 1..<peaks.count {
+            let currentPeak = peaks[i]
+            let previousPeak = peaks[i-1]
+
+            // 获取当前位置的变化点概率（如果存在）
+            let changePointProb = i-1 < changePoints.count ? changePoints[i-1].probability : 0.0
+            let isHighProbChangePoint = changePointProb >= ChangePointResult.confidenceThreshold
+
+            // 混合决策：贝叶斯概率 + 统计阈值
+            let shouldSplit = isHighProbChangePoint ||
+                shouldClusterPeaks(
+                    previous: previousPeak,
+                    current: currentPeak,
+                    currentCluster: currentCluster,
+                    intervalStats: intervalStats
+                ) == false
+
+            if shouldSplit {
+                // 保存当前簇，开始新簇
+                if currentCluster.count >= config.minHitCount {
+                    clusters.append(currentCluster)
+                }
+                currentCluster = [currentPeak]
+            } else {
+                currentCluster.append(currentPeak)
+            }
+        }
+
+        // 保存最后一个簇
+        if currentCluster.count >= config.minHitCount {
+            clusters.append(currentCluster)
+        }
+
+        // 回溯合并（使用更保守的策略，因为贝叶斯已经优化了边界）
+        return mergeAdjacentClusters(clusters)
+    }
+
+    /// 转换 IntervalStatistics 为 BayesianChangePointDetector.IntervalStatistics
+    private func convertIntervalStatistics(_ stats: IntervalStatistics) -> BayesianChangePointDetector.IntervalStatistics {
+        return BayesianChangePointDetector.IntervalStatistics(
+            mean: stats.mean,
+            stdDev: stats.stdDev,
+            median: stats.median,
+            percentile75: stats.percentile75,
+            percentile90: stats.percentile90,
+            percentile95: stats.percentile95,
+            rallyBoundaryThreshold: stats.rallyBoundaryThreshold,
+            maxHitInterval: stats.maxHitInterval
+        )
+    }
+
     /// 合并相邻的回合（如果它们实际上属于同一个回合）
     private func mergeAdjacentRallies(_ rallies: [Rally]) -> [Rally] {
         guard rallies.count > 1 else { return rallies }

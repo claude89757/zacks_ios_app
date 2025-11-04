@@ -400,6 +400,7 @@
 				DEVELOPMENT_TEAM = A2YR8HBQKY;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = ZacksTennis;
 				INFOPLIST_KEY_LSApplicationCategoryType = "";
 				INFOPLIST_KEY_NSCameraUsageDescription = "我们需要访问相机来录制和分析您的网球视频";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "需要访问麦克风来录制视频声音";
@@ -407,7 +408,6 @@
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "我们需要访问照片库来导入您的网球视频进行AI分析";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = ZacksTennis;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -438,6 +438,7 @@
 				DEVELOPMENT_TEAM = A2YR8HBQKY;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = ZacksTennis;
 				INFOPLIST_KEY_LSApplicationCategoryType = "";
 				INFOPLIST_KEY_NSCameraUsageDescription = "我们需要访问相机来录制和分析您的网球视频";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "需要访问麦克风来录制视频声音";
@@ -445,7 +446,6 @@
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "我们需要访问照片库来导入您的网球视频进行AI分析";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = ZacksTennis;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
