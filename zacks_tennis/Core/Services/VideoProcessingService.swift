@@ -115,31 +115,154 @@ class VideoProcessingService {
         return exportedFiles
     }
 
-    /// 导出自定义精彩片段列表
+    /// 导出自定义精彩片段列表（合并为一个视频）
     func exportCustomHighlights(from video: Video, highlights: [VideoHighlight], exportName: String) async throws -> [ExportedFile] {
         isProcessing = true
         processingProgress = 0.0
-        currentOperation = "正在导出自定义片段..."
+        currentOperation = "正在合并精彩片段..."
         defer { isProcessing = false }
 
-        var exportedFiles: [ExportedFile] = []
-
-        for (index, highlight) in highlights.enumerated() {
-            let progress = Double(index) / Double(highlights.count)
-            await updateProgress(progress, operation: "导出片段 \(index + 1)/\(highlights.count)")
-
-            let fileName = makeExportFileName(for: video, exportName: exportName, index: index + 1)
-            let exportedFile = try await exportHighlight(
-                from: video,
-                highlight: highlight,
-                fileName: fileName
-            )
-            exportedFiles.append(exportedFile)
-        }
+        // 合并所有片段为一个视频
+        let mergedFile = try await exportMergedHighlights(
+            from: video,
+            highlights: highlights,
+            exportName: exportName
+        )
 
         await updateProgress(1.0, operation: "导出完成")
 
-        return exportedFiles
+        return [mergedFile]
+    }
+
+    /// 合并多个精彩片段为一个视频
+    private func exportMergedHighlights(from video: Video, highlights: [VideoHighlight], exportName: String) async throws -> ExportedFile {
+        print("🎬 开始合并 \(highlights.count) 个精彩片段")
+
+        guard !video.originalFilePath.isEmpty else {
+            throw VideoError.exportFailedWithReason("视频文件路径为空")
+        }
+
+        let videoURL = getVideoURL(for: video)
+        guard FileManager.default.fileExists(atPath: videoURL.path) else {
+            throw VideoError.exportFailedWithReason("源视频文件不存在")
+        }
+
+        let asset = AVAsset(url: videoURL)
+
+        // 创建组合对象
+        let composition = AVMutableComposition()
+
+        // 添加视频和音频轨道
+        guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
+            throw VideoError.noVideoTrack
+        }
+
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+
+        guard let compositionVideoTrack = composition.addMutableTrack(
+            withMediaType: .video,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            throw VideoError.exportFailedWithReason("无法创建视频轨道")
+        }
+
+        var compositionAudioTrack: AVMutableCompositionTrack?
+        if !audioTracks.isEmpty {
+            compositionAudioTrack = composition.addMutableTrack(
+                withMediaType: .audio,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            )
+        }
+
+        // 按时间顺序添加每个片段
+        var currentTime = CMTime.zero
+
+        for (index, highlight) in highlights.enumerated() {
+            let progress = Double(index) / Double(highlights.count)
+            await updateProgress(progress, operation: "合并片段 \(index + 1)/\(highlights.count)")
+
+            let startTime = CMTime(seconds: highlight.startTime, preferredTimescale: 600)
+            let endTime = CMTime(seconds: highlight.endTime, preferredTimescale: 600)
+            let timeRange = CMTimeRange(start: startTime, end: endTime)
+
+            do {
+                // 插入视频片段
+                try compositionVideoTrack.insertTimeRange(
+                    timeRange,
+                    of: videoTrack,
+                    at: currentTime
+                )
+
+                // 插入音频片段（如果有）
+                if let compositionAudioTrack = compositionAudioTrack,
+                   let audioTrack = audioTracks.first {
+                    try compositionAudioTrack.insertTimeRange(
+                        timeRange,
+                        of: audioTrack,
+                        at: currentTime
+                    )
+                }
+
+                currentTime = CMTimeAdd(currentTime, timeRange.duration)
+
+            } catch {
+                print("⚠️ 片段 \(index + 1) 插入失败: \(error.localizedDescription)")
+                throw VideoError.exportFailedWithReason("合并片段失败: \(error.localizedDescription)")
+            }
+        }
+
+        // 生成导出文件名
+        let fileName = "\(exportName)_merged_\(Date().timeIntervalSince1970).mp4"
+        let outputURL = getDocumentsDirectory().appendingPathComponent(fileName)
+
+        // 如果文件已存在，删除
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            try? FileManager.default.removeItem(at: outputURL)
+        }
+
+        await updateProgress(0.9, operation: "正在编码合并后的视频...")
+
+        // 创建导出会话
+        guard let exportSession = AVAssetExportSession(
+            asset: composition,
+            presetName: AVAssetExportPresetHighestQuality
+        ) else {
+            throw VideoError.exportFailedWithReason("无法创建导出会话")
+        }
+
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = .mp4
+
+        // 执行导出
+        await exportSession.export()
+
+        // 检查导出状态
+        switch exportSession.status {
+        case .completed:
+            let fileSize = try getFileSize(from: outputURL)
+            print("✅ 合并完成: \(fileName)")
+            print("   文件大小: \(ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file))")
+            print("   总时长: \(composition.duration.seconds)秒")
+
+            return ExportedFile(
+                id: UUID(),
+                filePath: fileName,
+                exportedAt: Date(),
+                type: exportName,
+                fileSize: fileSize
+            )
+
+        case .failed:
+            let errorMsg = exportSession.error?.localizedDescription ?? "未知错误"
+            print("❌ 导出失败: \(errorMsg)")
+            throw VideoError.exportFailedWithReason("视频合并失败: \(errorMsg)")
+
+        case .cancelled:
+            throw VideoError.exportFailedWithReason("导出已取消")
+
+        default:
+            throw VideoError.exportFailed
+        }
     }
 
     /// 导出带网球标注的精彩片段（调试用）

@@ -8,6 +8,7 @@
 import Foundation
 import SwiftData
 import PhotosUI
+import Photos
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -25,6 +26,7 @@ class VideoEditorViewModel {
     var currentOperation: String = ""
     var errorMessage: String?
     var showError: Bool = false
+    var exportedFileCount: Int = 0  // 成功导出并保存到相册的文件数量
 
     // MARK: - Computed Properties
 
@@ -361,7 +363,18 @@ class VideoEditorViewModel {
         }
 
         isExporting = true
+        exportedFileCount = 0  // 重置导出计数
+        processingProgress = 0.0  // 重置进度
         currentOperation = "正在导出精彩片段..."
+
+        // 启动进度同步任务
+        let progressTask = Task {
+            while !Task.isCancelled && isExporting {
+                self.processingProgress = VideoProcessingService.shared.processingProgress
+                self.currentOperation = VideoProcessingService.shared.currentOperation
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
 
         do {
             let exportedFiles = try await VideoProcessingService.shared.exportTopHighlights(
@@ -369,6 +382,8 @@ class VideoEditorViewModel {
                 count: count,
                 type: "top\(count)"
             )
+
+            progressTask.cancel()
 
             // 保存导出记录
             for file in exportedFiles {
@@ -378,12 +393,19 @@ class VideoEditorViewModel {
             try modelContext?.save()
             loadVideos()
 
-            currentOperation = "导出完成！"
+            processingProgress = 1.0
+            currentOperation = "正在保存到相册..."
 
-            // 保存到相册（可选）
+            // 保存到相册
             await saveToPhotoLibrary(files: exportedFiles)
 
+            // 只有在成功保存到相册后才标记为完成
+            if exportedFileCount > 0 {
+                currentOperation = "导出完成！"
+            }
+
         } catch {
+            progressTask.cancel()
             handleError(error)
         }
 
@@ -420,7 +442,19 @@ class VideoEditorViewModel {
         }
 
         isExporting = true
+        exportedFileCount = 0  // 重置导出计数
+        processingProgress = 0.0  // 重置进度
         currentOperation = "正在导出最长的 \(count) 个回合..."
+
+        // 启动进度同步任务
+        let progressTask = Task {
+            while !Task.isCancelled && isExporting {
+                // 同步 Service 的进度到 ViewModel
+                self.processingProgress = VideoProcessingService.shared.processingProgress
+                self.currentOperation = VideoProcessingService.shared.currentOperation
+                try? await Task.sleep(nanoseconds: 100_000_000) // 每 0.1 秒更新一次
+            }
+        }
 
         do {
             let exportedFiles = try await VideoProcessingService.shared.exportCustomHighlights(
@@ -428,6 +462,9 @@ class VideoEditorViewModel {
                 highlights: longestHighlights,
                 exportName: "longest\(count)"
             )
+
+            // 取消进度同步任务
+            progressTask.cancel()
 
             // 保存导出记录
             for file in exportedFiles {
@@ -437,12 +474,19 @@ class VideoEditorViewModel {
             try modelContext?.save()
             loadVideos()
 
-            currentOperation = "导出完成！"
+            processingProgress = 1.0
+            currentOperation = "正在保存到相册..."
 
-            // 保存到相册（可选）
+            // 保存到相册
             await saveToPhotoLibrary(files: exportedFiles)
 
+            // 只有在成功保存到相册后才标记为完成
+            if exportedFileCount > 0 {
+                currentOperation = "导出完成！"
+            }
+
         } catch {
+            progressTask.cancel()
             handleError(error)
         }
 
@@ -468,7 +512,18 @@ class VideoEditorViewModel {
         }
 
         isExporting = true
+        exportedFileCount = 0  // 重置导出计数
+        processingProgress = 0.0  // 重置进度
         currentOperation = "正在导出 \(favorites.count) 个收藏回合..."
+
+        // 启动进度同步任务
+        let progressTask = Task {
+            while !Task.isCancelled && isExporting {
+                self.processingProgress = VideoProcessingService.shared.processingProgress
+                self.currentOperation = VideoProcessingService.shared.currentOperation
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
 
         do {
             let exportedFiles = try await VideoProcessingService.shared.exportCustomHighlights(
@@ -476,6 +531,8 @@ class VideoEditorViewModel {
                 highlights: favorites,
                 exportName: "favorites"
             )
+
+            progressTask.cancel()
 
             // 保存导出记录
             for file in exportedFiles {
@@ -485,12 +542,19 @@ class VideoEditorViewModel {
             try modelContext?.save()
             loadVideos()
 
-            currentOperation = "导出完成！"
+            processingProgress = 1.0
+            currentOperation = "正在保存到相册..."
 
-            // 保存到相册（可选）
+            // 保存到相册
             await saveToPhotoLibrary(files: exportedFiles)
 
+            // 只有在成功保存到相册后才标记为完成
+            if exportedFileCount > 0 {
+                currentOperation = "导出完成！"
+            }
+
         } catch {
+            progressTask.cancel()
             handleError(error)
         }
 
@@ -516,7 +580,18 @@ class VideoEditorViewModel {
         }
 
         isExporting = true
+        exportedFileCount = 0  // 重置导出计数
+        processingProgress = 0.0  // 重置进度
         currentOperation = "正在导出带标注的视频..."
+
+        // 启动进度同步任务
+        let progressTask = Task {
+            while !Task.isCancelled && isExporting {
+                self.processingProgress = VideoProcessingService.shared.processingProgress
+                self.currentOperation = VideoProcessingService.shared.currentOperation
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
 
         do {
             // 导出带标注的视频
@@ -526,6 +601,8 @@ class VideoEditorViewModel {
                 exportName: "ball-annotations"
             )
 
+            progressTask.cancel()
+
             // 保存导出记录
             for file in exportedFiles {
                 video.addExportedFile(file)
@@ -534,12 +611,19 @@ class VideoEditorViewModel {
             try modelContext?.save()
             loadVideos()
 
-            currentOperation = "导出完成！"
+            processingProgress = 1.0
+            currentOperation = "正在保存到相册..."
 
-            // 保存到相册（可选）
+            // 保存到相册
             await saveToPhotoLibrary(files: exportedFiles)
 
+            // 只有在成功保存到相册后才标记为完成
+            if exportedFileCount > 0 {
+                currentOperation = "导出完成！"
+            }
+
         } catch {
+            progressTask.cancel()
             handleError(error)
         }
 
@@ -585,8 +669,71 @@ class VideoEditorViewModel {
 
     /// 保存到相册
     private func saveToPhotoLibrary(files: [ExportedFile]) async {
-        // 实现保存到相册的逻辑
-        // 需要请求照片库权限
+        guard !files.isEmpty else { return }
+
+        // 检查相册权限
+        let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+
+        // 如果没有权限，请求权限
+        if status == .notDetermined {
+            let newStatus = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+            guard newStatus == .authorized || newStatus == .limited else {
+                await MainActor.run {
+                    errorMessage = "需要相册权限才能保存视频。\n\n建议：请在设置中允许访问相册。"
+                    showError = true
+                }
+                return
+            }
+        } else if status == .denied || status == .restricted {
+            await MainActor.run {
+                errorMessage = "无法保存到相册：权限被拒绝。\n\n建议：请在设置中允许应用访问相册。"
+                showError = true
+            }
+            return
+        }
+
+        // 保存每个文件到相册
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        var successCount = 0
+
+        for file in files {
+            let fileURL = documentsURL.appendingPathComponent(file.filePath)
+
+            // 验证文件存在
+            guard FileManager.default.fileExists(atPath: fileURL.path) else {
+                print("⚠️ 文件不存在，跳过保存: \(file.filePath)")
+                continue
+            }
+
+            do {
+                try await PHPhotoLibrary.shared().performChanges {
+                    PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: fileURL)
+                }
+                successCount += 1
+                print("✅ 已保存到相册: \(file.filePath)")
+            } catch {
+                print("❌ 保存到相册失败: \(file.filePath) - \(error.localizedDescription)")
+                // 继续尝试保存其他文件
+            }
+        }
+
+        // 更新成功保存的文件数量
+        await MainActor.run {
+            exportedFileCount = successCount
+        }
+
+        // 如果部分失败，显示警告
+        if successCount < files.count && successCount > 0 {
+            await MainActor.run {
+                errorMessage = "部分视频保存失败。\n\n成功: \(successCount)/\(files.count)\n建议：请稍后重试失败的文件。"
+                showError = true
+            }
+        } else if successCount == 0 {
+            await MainActor.run {
+                errorMessage = "所有视频保存失败。\n\n建议：\n• 检查相册权限\n• 确认设备存储空间充足\n• 重启应用后重试"
+                showError = true
+            }
+        }
     }
 
     /// 错误处理

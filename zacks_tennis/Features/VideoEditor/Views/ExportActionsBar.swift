@@ -14,25 +14,46 @@ struct ExportActionsBar: View {
     @Binding var showExportOptions: Bool
 
     var body: some View {
-        // 单个导出按钮
-        Button {
-            showExportOptions = true
-        } label: {
-            HStack {
-                Image(systemName: "square.and.arrow.up")
-                    .font(.body)
-
-                Text("导出")
-                    .font(.body)
-                    .fontWeight(.semibold)
+        VStack(spacing: 8) {
+            // 状态消息
+            if viewModel.isBusy, let message = viewModel.busyStatusMessage {
+                HStack {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                    Text(message)
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                }
+                .padding(.horizontal)
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 16)
-            .background(Color.green)
-            .foregroundColor(.white)
-            .cornerRadius(12)
+
+            // 导出按钮
+            Button {
+                showExportOptions = true
+            } label: {
+                HStack {
+                    if viewModel.isBusy {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                            .scaleEffect(0.8)
+                    } else {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.body)
+                    }
+
+                    Text(viewModel.isBusy ? "导出中..." : "导出")
+                        .font(.body)
+                        .fontWeight(.semibold)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 16)
+                .background(viewModel.isBusy ? Color.gray : Color.green)
+                .foregroundColor(.white)
+                .cornerRadius(12)
+            }
+            .disabled(viewModel.isBusy)
+            .padding(.horizontal)
         }
-        .padding(.horizontal)
         .padding(.vertical, 12)
         .background(Color(.systemBackground))
         .shadow(color: Color.black.opacity(0.1), radius: 8, x: 0, y: -2)

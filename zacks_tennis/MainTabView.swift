@@ -13,13 +13,13 @@ struct MainTabView: View {
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            // 1. 网球场信息
-            CourtInfoView()
-                .tabItem {
-                    Label("场地", systemImage: "tennis.racket")
-                }
-                .tag(Tab.courts)
-            
+            // 1. 网球场信息 (已注释)
+//            CourtInfoView()
+//                .tabItem {
+//                    Label("场地", systemImage: "tennis.racket")
+//                }
+//                .tag(Tab.courts)
+
             // 2. AI 视频剪辑
             VideoEditorView()
                 .tabItem {
@@ -27,19 +27,26 @@ struct MainTabView: View {
                 }
                 .tag(Tab.videoEditor)
 
-            // 3. AI 聊天助手
-            AIChatView()
-                .tabItem {
-                    Label("ZACKS", systemImage: "message.badge.filled.fill")
-                }
-                .tag(Tab.aiChat)
+            // 3. AI 聊天助手 (已注释)
+//            AIChatView()
+//                .tabItem {
+//                    Label("ZACKS", systemImage: "message.badge.filled.fill")
+//                }
+//                .tag(Tab.aiChat)
 
-            // 4. 用户资料
-            ProfileView()
+            // 4. 用户资料 (已注释)
+//            ProfileView()
+//                .tabItem {
+//                    Label("我的", systemImage: "person.circle")
+//                }
+//                .tag(Tab.profile)
+
+            // 5. 算法说明
+            AlgorithmDescriptionView()
                 .tabItem {
-                    Label("我的", systemImage: "person.circle")
+                    Label("说明", systemImage: "doc.text.image")
                 }
-                .tag(Tab.profile)
+                .tag(Tab.description)
         }
         .accentColor(.green) // 网球主题色
     }
@@ -52,6 +59,7 @@ extension MainTabView {
         case aiChat
         case videoEditor
         case profile
+        case description
     }
 }
 

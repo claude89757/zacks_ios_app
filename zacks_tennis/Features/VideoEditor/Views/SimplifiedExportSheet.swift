@@ -14,17 +14,35 @@ struct SimplifiedExportSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var showExportError = false
+    @State private var showExportProgress = false  // 控制模态进度弹窗
+    @State private var showSuccessAlert = false    // 控制成功提示
+    @State private var exportedCount = 0           // 导出的视频数量
 
     var body: some View {
         NavigationStack {
             List {
+                // 状态横幅
+                if viewModel.isBusy, let message = viewModel.busyStatusMessage {
+                    Section {
+                        HStack {
+                            ProgressView()
+                                .scaleEffect(0.9)
+                            Text(message)
+                                .font(.subheadline)
+                                .foregroundColor(.orange)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+
                 Section {
                     // 选项1：最长的10个回合
                     ExportOptionRow(
                         title: "最长的 10 个回合",
                         subtitle: formatDuration(video.getLongestHighlights(count: 10)),
                         icon: "arrow.up.right.circle.fill",
-                        color: .blue
+                        color: .blue,
+                        isDisabled: viewModel.isBusy
                     ) {
                         exportLongest(10)
                     }
@@ -34,7 +52,8 @@ struct SimplifiedExportSheet: View {
                         title: "最长的 5 个回合",
                         subtitle: formatDuration(video.getLongestHighlights(count: 5)),
                         icon: "arrow.up.circle.fill",
-                        color: .green
+                        color: .green,
+                        isDisabled: viewModel.isBusy
                     ) {
                         exportLongest(5)
                     }
@@ -45,7 +64,7 @@ struct SimplifiedExportSheet: View {
                         subtitle: "\(video.favoriteHighlights.count) 个回合",
                         icon: "heart.fill",
                         color: .red,
-                        isDisabled: video.favoriteHighlights.isEmpty
+                        isDisabled: video.favoriteHighlights.isEmpty || viewModel.isBusy
                     ) {
                         exportFavorites()
                     }
@@ -61,7 +80,7 @@ struct SimplifiedExportSheet: View {
                         subtitle: "显示网球轨迹和检测框（调试用）",
                         icon: "scope",
                         color: .orange,
-                        isDisabled: video.highlights.isEmpty
+                        isDisabled: video.highlights.isEmpty || viewModel.isBusy
                     ) {
                         exportWithBallAnnotations()
                     }
@@ -94,39 +113,83 @@ struct SimplifiedExportSheet: View {
         } message: { message in
             Text(message)
         }
+        .alert("导出成功", isPresented: $showSuccessAlert) {
+            Button("好的") {
+                dismiss()
+            }
+        } message: {
+            if exportedCount == 1 {
+                Text("精彩片段已合并并保存到相册")
+            } else {
+                Text("已导出 \(exportedCount) 个视频到相册")
+            }
+        }
+        .overlay {
+            // 模态进度弹窗（导出时显示）
+            if showExportProgress {
+                ExportProgressDialog(viewModel: viewModel)
+            }
+        }
     }
 
     // MARK: - Actions
 
     private func exportLongest(_ count: Int) {
         Task {
+            // 显示模态进度弹窗
+            showExportProgress = true
+
             await viewModel.exportLongestHighlights(from: video, count: count)
-            // 只在导出成功时才关闭Sheet，让用户能看到错误提示
-            if !viewModel.showError {
-                dismiss()
+
+            // 隐藏进度弹窗
+            showExportProgress = false
+
+            // 如果导出成功，显示成功提示
+            if !viewModel.showError && viewModel.exportedFileCount > 0 {
+                exportedCount = viewModel.exportedFileCount
+                showSuccessAlert = true
             }
+            // 错误提示会自动通过 onChange 显示
         }
     }
 
     private func exportFavorites() {
         guard !video.favoriteHighlights.isEmpty else { return }
         Task {
+            // 显示模态进度弹窗
+            showExportProgress = true
+
             await viewModel.exportFavoriteHighlights(from: video)
-            // 只在导出成功时才关闭Sheet，让用户能看到错误提示
-            if !viewModel.showError {
-                dismiss()
+
+            // 隐藏进度弹窗
+            showExportProgress = false
+
+            // 如果导出成功，显示成功提示
+            if !viewModel.showError && viewModel.exportedFileCount > 0 {
+                exportedCount = viewModel.exportedFileCount
+                showSuccessAlert = true
             }
+            // 错误提示会自动通过 onChange 显示
         }
     }
 
     private func exportWithBallAnnotations() {
         guard !video.highlights.isEmpty else { return }
         Task {
+            // 显示模态进度弹窗
+            showExportProgress = true
+
             await viewModel.exportWithBallAnnotations(from: video)
-            // 只在导出成功时才关闭Sheet，让用户能看到错误提示
-            if !viewModel.showError {
-                dismiss()
+
+            // 隐藏进度弹窗
+            showExportProgress = false
+
+            // 如果导出成功，显示成功提示
+            if !viewModel.showError && viewModel.exportedFileCount > 0 {
+                exportedCount = viewModel.exportedFileCount
+                showSuccessAlert = true
             }
+            // 错误提示会自动通过 onChange 显示
         }
     }
 

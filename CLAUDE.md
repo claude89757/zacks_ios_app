@@ -75,3 +75,4 @@ zacks_tennis/
 - **Automatically**: When accepting plans with 3+ implementation steps
 - **Automatically**: When user says "continue working on [task]"
 - **Ask first**: For medium tasks (2-3 steps)
+- iphone模拟设备 iphone 17
