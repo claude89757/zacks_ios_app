@@ -131,8 +131,11 @@ actor AudioAnalyzer: AudioAnalyzing {
             }
         }
 
-        // 5. 后处理：过滤和合并相近的峰值
-        let filteredPeaks = postProcessPeaks(audioPeaks)
+        // 5. 自适应阈值过滤：基于统计量动态调整
+        let adaptiveFiltered = adaptiveThresholdFiltering(audioPeaks)
+
+        // 6. 后处理：过滤和合并相近的峰值
+        let filteredPeaks = postProcessPeaks(adaptiveFiltered)
 
         return AudioAnalysisResult(hitSounds: filteredPeaks)
     }
@@ -200,6 +203,19 @@ actor AudioAnalyzer: AudioAnalyzing {
         // 5. 检测攻击时间（attack time）- 击球声的特征是快速上升
         let attackTime = calculateAttackTime(samples: floatSamples, sampleRate: sampleRate)
 
+        // 5a. 计算事件持续时间 - 击球声通常在 20-100ms 之间
+        let eventDuration = calculateEventDuration(samples: floatSamples, sampleRate: sampleRate)
+
+        // 5b. 时长过滤：击球声的典型持续时间
+        // 合理范围：15ms - 120ms（稍微放宽以适应不同情况）
+        let isValidDuration = eventDuration >= 0.015 && eventDuration <= 0.12
+
+        // 如果持续时间明显不合理，直接过滤掉
+        // 但如果置信度特别高（> 0.75），可以放宽时长要求
+        if !isValidDuration && peakAmplitude < 0.6 {
+            return nil
+        }
+
         // 6. 计算置信度（基于多个特征，包括频谱）
         let confidence = calculateHitSoundConfidenceEnhanced(
             rms: rms,
@@ -207,7 +223,8 @@ actor AudioAnalyzer: AudioAnalyzing {
             samples: samples,
             sampleRate: sampleRate,
             spectralAnalysis: spectralAnalysis,
-            attackTime: attackTime
+            attackTime: attackTime,
+            eventDuration: eventDuration
         )
 
         // 7. 精确定位峰值时间（使用插值）
@@ -217,7 +234,7 @@ actor AudioAnalyzer: AudioAnalyzing {
         // 收紧条件：提高置信度阈值，减少误报
         // 对于明显的峰值（幅度很高），可以稍微放宽置信度要求
         let confidenceThreshold = peakAmplitude > 0.5 ? config.minimumConfidence * 0.9 : config.minimumConfidence
-        
+
         if confidence >= confidenceThreshold {
             return AudioPeak(
                 time: preciseTimestamp,
@@ -277,6 +294,8 @@ actor AudioAnalyzer: AudioAnalyzing {
         let spectralContrast: Double  // 频谱对比度（区分击球声和背景噪声）
         let spectralFlux: Double  // 频谱通量（检测瞬态变化）
         let highFreqEnergyRatio: Double  // 高频能量占比（1000-3000Hz / 总能量）
+        let mfccCoefficients: [Double]  // MFCC系数（13维，提高鲁棒性）
+        let mfccVariance: Double  // MFCC系数方差（衡量音频复杂度）
     }
 
     /// 频谱分析（使用FFT检测击球声的典型频率特征）
@@ -293,7 +312,9 @@ actor AudioAnalyzer: AudioAnalyzing {
                 spectralRolloff: 0,
                 spectralContrast: 0,
                 spectralFlux: 0,
-                highFreqEnergyRatio: 0
+                highFreqEnergyRatio: 0,
+                mfccCoefficients: [Double](repeating: 0, count: 13),
+                mfccVariance: 0
             )
         }
         
@@ -323,7 +344,9 @@ actor AudioAnalyzer: AudioAnalyzing {
                 spectralRolloff: 0,
                 spectralContrast: 0,
                 spectralFlux: 0,
-                highFreqEnergyRatio: 0
+                highFreqEnergyRatio: 0,
+                mfccCoefficients: [Double](repeating: 0, count: 13),
+                mfccVariance: 0
             )
         }
         defer { vDSP_destroy_fftsetup(fftSetup) }
@@ -464,7 +487,19 @@ actor AudioAnalyzer: AudioAnalyzing {
             }
             spectralFlux = sqrt(spectralFlux) / Double(halfSize)
         }
-        
+
+        // 计算 MFCC 系数（13维）- 提高鲁棒性和噪声抑制能力
+        let mfccCoeffs = calculateMFCC(
+            powerSpectrum: powerSpectrum,
+            sampleRate: sampleRate,
+            fftSize: fftSize,
+            numCoefficients: 13
+        )
+
+        // 计算 MFCC 方差（衡量音频复杂度）
+        let mfccMean = mfccCoeffs.reduce(0, +) / Double(mfccCoeffs.count)
+        let mfccVariance = mfccCoeffs.map { pow($0 - mfccMean, 2) }.reduce(0, +) / Double(mfccCoeffs.count)
+
         return SpectralAnalysis(
             dominantFrequency: dominantFrequency,
             energyInHitRange: energyInHitRange,
@@ -474,23 +509,25 @@ actor AudioAnalyzer: AudioAnalyzing {
             spectralRolloff: spectralRolloff,
             spectralContrast: spectralContrast,
             spectralFlux: spectralFlux,
-            highFreqEnergyRatio: highFreqEnergyRatio
+            highFreqEnergyRatio: highFreqEnergyRatio,
+            mfccCoefficients: mfccCoeffs,
+            mfccVariance: mfccVariance
         )
     }
 
     /// 计算攻击时间（attack time）- 击球声的特征是快速上升
     private func calculateAttackTime(samples: [Float], sampleRate: Double) -> Double {
         guard samples.count > 10 else { return 1.0 }
-        
+
         // 找到最大值的索引
         guard let maxIndex = samples.enumerated().max(by: { abs($0.element) < abs($1.element) })?.offset else {
             return 1.0
         }
-        
+
         // 从开始到峰值，计算上升时间
         let peakValue = abs(samples[maxIndex])
         let threshold = peakValue * 0.1 // 10%阈值
-        
+
         var attackStartIndex = 0
         for i in stride(from: max(0, maxIndex - 100), to: maxIndex, by: 1) {
             if abs(samples[i]) >= threshold {
@@ -498,12 +535,54 @@ actor AudioAnalyzer: AudioAnalyzing {
                 break
             }
         }
-        
+
         let attackSamples = maxIndex - attackStartIndex
         let attackTime = Double(attackSamples) / sampleRate
-        
+
         // 击球声的攻击时间通常在0.001-0.01秒之间
         return attackTime
+    }
+
+    /// 计算音频事件持续时间 - 从事件开始到结束的完整时长
+    /// - Parameters:
+    ///   - samples: 音频样本
+    ///   - sampleRate: 采样率
+    /// - Returns: 事件持续时间（秒）
+    private func calculateEventDuration(samples: [Float], sampleRate: Double) -> Double {
+        guard samples.count > 10 else { return 0 }
+
+        // 找到峰值
+        guard let maxIndex = samples.enumerated().max(by: { abs($0.element) < abs($1.element) })?.offset else {
+            return 0
+        }
+
+        let peakValue = abs(samples[maxIndex])
+        let startThreshold = peakValue * 0.1  // 10% 阈值作为起始点
+        let endThreshold = peakValue * 0.05   // 5% 阈值作为结束点（更宽松）
+
+        // 向前搜索事件起始点
+        var startIndex = 0
+        for i in stride(from: maxIndex, through: 0, by: -1) {
+            if abs(samples[i]) < startThreshold {
+                startIndex = i
+                break
+            }
+        }
+
+        // 向后搜索事件结束点
+        var endIndex = samples.count - 1
+        for i in maxIndex..<samples.count {
+            if abs(samples[i]) < endThreshold {
+                endIndex = i
+                break
+            }
+        }
+
+        // 计算持续时间
+        let durationSamples = endIndex - startIndex
+        let duration = Double(durationSamples) / sampleRate
+
+        return duration
     }
 
     /// 精确定位峰值时间（使用插值）
@@ -537,6 +616,127 @@ actor AudioAnalyzer: AudioAnalyzing {
         return power
     }
 
+    // MARK: - MFCC Calculation
+
+    /// 将赫兹转换为梅尔刻度
+    private func hertzToMel(_ hz: Double) -> Double {
+        return 2595.0 * log10(1.0 + hz / 700.0)
+    }
+
+    /// 将梅尔刻度转换为赫兹
+    private func melToHertz(_ mel: Double) -> Double {
+        return 700.0 * (pow(10.0, mel / 2595.0) - 1.0)
+    }
+
+    /// 创建梅尔滤波器组
+    /// - Parameters:
+    ///   - numFilters: 滤波器数量（通常为26）
+    ///   - fftSize: FFT大小
+    ///   - sampleRate: 采样率
+    ///   - lowFreq: 最低频率（Hz）
+    ///   - highFreq: 最高频率（Hz）
+    /// - Returns: 滤波器组矩阵 [numFilters][fftSize/2]
+    private func createMelFilterbank(
+        numFilters: Int = 26,
+        fftSize: Int,
+        sampleRate: Double,
+        lowFreq: Double = 0,
+        highFreq: Double? = nil
+    ) -> [[Double]] {
+        let highFreqValue = highFreq ?? sampleRate / 2.0
+        let numBins = fftSize / 2
+
+        // 转换到梅尔刻度
+        let lowMel = hertzToMel(lowFreq)
+        let highMel = hertzToMel(highFreqValue)
+
+        // 在梅尔刻度上均匀分布滤波器中心点
+        var melPoints = [Double](repeating: 0, count: numFilters + 2)
+        for i in 0..<(numFilters + 2) {
+            melPoints[i] = lowMel + Double(i) * (highMel - lowMel) / Double(numFilters + 1)
+        }
+
+        // 转换回赫兹
+        let hzPoints = melPoints.map { melToHertz($0) }
+
+        // 转换为FFT频率bin索引
+        let binPoints = hzPoints.map { Int(floor(Double(fftSize + 1) * $0 / sampleRate)) }
+
+        // 创建滤波器组
+        var filterbank = [[Double]](repeating: [Double](repeating: 0, count: numBins), count: numFilters)
+
+        for i in 0..<numFilters {
+            let leftBin = binPoints[i]
+            let centerBin = binPoints[i + 1]
+            let rightBin = binPoints[i + 2]
+
+            // 上升斜坡
+            for j in leftBin..<centerBin {
+                if j < numBins && centerBin > leftBin {
+                    filterbank[i][j] = Double(j - leftBin) / Double(centerBin - leftBin)
+                }
+            }
+
+            // 下降斜坡
+            for j in centerBin..<rightBin {
+                if j < numBins && rightBin > centerBin {
+                    filterbank[i][j] = Double(rightBin - j) / Double(rightBin - centerBin)
+                }
+            }
+        }
+
+        return filterbank
+    }
+
+    /// 计算MFCC系数
+    /// - Parameters:
+    ///   - powerSpectrum: 功率谱
+    ///   - sampleRate: 采样率
+    ///   - fftSize: FFT大小
+    ///   - numCoefficients: 返回的MFCC系数数量（通常为13）
+    /// - Returns: MFCC系数数组
+    private func calculateMFCC(
+        powerSpectrum: [Float],
+        sampleRate: Double,
+        fftSize: Int,
+        numCoefficients: Int = 13
+    ) -> [Double] {
+        let numFilters = 26
+        let halfSize = fftSize / 2
+
+        // 创建梅尔滤波器组
+        let filterbank = createMelFilterbank(
+            numFilters: numFilters,
+            fftSize: fftSize,
+            sampleRate: sampleRate,
+            lowFreq: 0,
+            highFreq: sampleRate / 2.0
+        )
+
+        // 应用滤波器组并计算对数能量
+        var filterEnergies = [Double](repeating: 0, count: numFilters)
+        for i in 0..<numFilters {
+            var energy: Double = 0
+            for j in 0..<min(halfSize, filterbank[i].count) {
+                energy += Double(powerSpectrum[j]) * filterbank[i][j]
+            }
+            // 取对数（添加小常数避免log(0)）
+            filterEnergies[i] = log(max(energy, 1e-10))
+        }
+
+        // 应用DCT（离散余弦变换）得到MFCC系数
+        var mfccCoeffs = [Double](repeating: 0, count: numCoefficients)
+        for i in 0..<numCoefficients {
+            var sum: Double = 0
+            for j in 0..<numFilters {
+                sum += filterEnergies[j] * cos(Double(i) * (Double(j) + 0.5) * Double.pi / Double(numFilters))
+            }
+            mfccCoeffs[i] = sum
+        }
+
+        return mfccCoeffs
+    }
+
     /// 计算 RMS（均方根）功率
     private func calculateRMS(samples: [Int16]) -> Double {
         var sum: Double = 0.0
@@ -565,55 +765,80 @@ actor AudioAnalyzer: AudioAnalyzing {
         samples: [Int16],
         sampleRate: Double,
         spectralAnalysis: SpectralAnalysis,
-        attackTime: Double
+        attackTime: Double,
+        eventDuration: Double
     ) -> Double {
 
         var confidence: Double = 0.0
 
         // 优化权重分配：如果击球声很明显，应该更信任峰值幅度
-        
+
         // 特征1：峰值幅度（最重要，因为击球声很明显）- 提高权重
         let amplitudeScore = min(peakAmplitude / 0.6, 1.0) // 降低分母，提高敏感度
-        confidence += amplitudeScore * 0.35 // 35% 权重（原来20%）
+        confidence += amplitudeScore * 0.33 // 33% 权重（从35%调整）
 
         // 特征2：峰值与 RMS 的比值（击球声是短促的高峰值）
         let crestFactor = peakAmplitude / (rms + 0.001)
         let crestScore = min(crestFactor / 4.0, 1.0) // 降低阈值，提高敏感度
-        confidence += crestScore * 0.25 // 25% 权重
+        confidence += crestScore * 0.23 // 23% 权重（从25%调整）
 
         // 特征3：信号能量集中度
         let energyConcentration = calculateEnergyConcentration(samples: samples)
-        confidence += energyConcentration * 0.15 // 15% 权重
+        confidence += energyConcentration * 0.14 // 14% 权重（从15%调整）
 
         // 特征4：主频率范围检测（1000-3000Hz，拍线振动特征）- 最重要的频谱特征
-        let frequencyInPrimaryRange = spectralAnalysis.dominantFrequency >= 1000 && 
+        let frequencyInPrimaryRange = spectralAnalysis.dominantFrequency >= 1000 &&
                                      spectralAnalysis.dominantFrequency <= 3000
-        let frequencyScore = frequencyInPrimaryRange ? 1.0 : 
-                           (spectralAnalysis.dominantFrequency >= 300 && 
+        let frequencyScore = frequencyInPrimaryRange ? 1.0 :
+                           (spectralAnalysis.dominantFrequency >= 300 &&
                             spectralAnalysis.dominantFrequency <= 5000 ? 0.6 : 0.3)
-        confidence += frequencyScore * 0.15 // 15% 权重（提高权重）
+        confidence += frequencyScore * 0.14 // 14% 权重（从15%调整）
 
         // 特征5：高频能量占比（1000-3000Hz能量占比）- 网球击球声的核心特征
         // 网球击球声的高频能量占比应该较高（>0.15）
         let highFreqRatioScore = min(spectralAnalysis.highFreqEnergyRatio / 0.15, 1.0)
-        confidence += highFreqRatioScore * 0.15 // 15% 权重（新增，重要特征）
+        confidence += highFreqRatioScore * 0.14 // 14% 权重（从15%调整）
 
         // 特征6：主频率范围内的能量（1000-3000Hz）- 拍线振动能量
         let primaryRangeEnergyScore = min(spectralAnalysis.energyInPrimaryRange * 3.0, 1.0)
-        confidence += primaryRangeEnergyScore * 0.10 // 10% 权重（新增）
+        confidence += primaryRangeEnergyScore * 0.09 // 9% 权重（从10%调整）
 
         // 特征7：频谱对比度（区分击球声和背景噪声）
         let contrastScore = min(spectralAnalysis.spectralContrast * 2.0, 1.0)
-        confidence += contrastScore * 0.10 // 10% 权重（新增）
+        confidence += contrastScore * 0.09 // 9% 权重（从10%调整）
 
         // 特征8：频谱通量（检测瞬态变化）- 击球声是瞬态的
         let fluxScore = min(spectralAnalysis.spectralFlux * 5.0, 1.0)
-        confidence += fluxScore * 0.05 // 5% 权重（新增）
+        confidence += fluxScore * 0.05 // 5% 权重
 
         // 特征9：攻击时间（放宽范围）
         let attackTimeScore = (attackTime > 0.0003 && attackTime < 0.03) ? 1.0 : 0.7
         confidence += attackTimeScore * 0.05 // 5% 权重
 
+        // 特征10：MFCC方差（音频复杂度）- 击球声具有特定的频谱特征，方差较大
+        // MFCC方差范围通常在 0-500 之间，击球声通常 > 20
+        let mfccVarianceScore = min(spectralAnalysis.mfccVariance / 50.0, 1.0)
+        confidence += mfccVarianceScore * 0.07 // 7% 权重（从8%调整）
+
+        // 特征11：事件持续时间（20-100ms 是击球声的典型范围）
+        // 持续时间在最优范围内得满分，偏离则降低评分
+        let optimalDurationMin: Double = 0.020  // 20ms
+        let optimalDurationMax: Double = 0.100  // 100ms
+        var durationScore: Double = 0.0
+
+        if eventDuration >= optimalDurationMin && eventDuration <= optimalDurationMax {
+            // 在最优范围内，得满分
+            durationScore = 1.0
+        } else if eventDuration < optimalDurationMin {
+            // 太短，线性降低评分（15ms以下归零）
+            durationScore = max(0, (eventDuration - 0.015) / (optimalDurationMin - 0.015))
+        } else {
+            // 太长，线性降低评分（120ms以上归零）
+            durationScore = max(0, (0.120 - eventDuration) / (0.120 - optimalDurationMax))
+        }
+        confidence += durationScore * 0.07 // 7% 权重（新增）
+
+        // 权重总和：100%
         return min(confidence, 1.0)
     }
 
@@ -644,6 +869,67 @@ actor AudioAnalyzer: AudioAnalyzing {
     }
 
     // MARK: - Private Methods - Post Processing
+
+    /// 自适应阈值过滤：基于局部统计动态调整置信度阈值
+    /// - Parameter peaks: 原始峰值数组
+    /// - Returns: 经过自适应过滤的峰值数组
+    private func adaptiveThresholdFiltering(_ peaks: [AudioPeak]) -> [AudioPeak] {
+        guard peaks.count >= 3 else { return peaks }
+
+        // 计算全局统计量
+        let confidences = peaks.map { $0.confidence }
+        let meanConfidence = confidences.reduce(0, +) / Double(confidences.count)
+        let variance = confidences.map { pow($0 - meanConfidence, 2) }.reduce(0, +) / Double(confidences.count)
+        let stdDev = sqrt(variance)
+
+        // 自适应阈值 = 均值 + 调整系数 × 标准差
+        // 使用保守的调整系数 1.0（可以根据实际效果调整）
+        let adaptiveThreshold = max(
+            config.minimumConfidence * 0.8,  // 最低不低于配置阈值的 80%
+            min(
+                meanConfidence + 1.0 * stdDev,  // 统计阈值
+                config.minimumConfidence * 1.2   // 最高不超过配置阈值的 120%
+            )
+        )
+
+        // 使用滑动窗口进行局部自适应过滤
+        var filtered: [AudioPeak] = []
+        let windowDuration: Double = 5.0  // 5秒滑动窗口
+
+        for (index, peak) in peaks.enumerated() {
+            // 获取窗口内的峰值（前后各 2.5 秒）
+            let windowStart = peak.time - windowDuration / 2.0
+            let windowEnd = peak.time + windowDuration / 2.0
+
+            let windowPeaks = peaks.filter { $0.time >= windowStart && $0.time <= windowEnd }
+
+            if windowPeaks.count >= 2 {
+                // 计算窗口内的局部统计量
+                let localConfidences = windowPeaks.map { $0.confidence }
+                let localMean = localConfidences.reduce(0, +) / Double(localConfidences.count)
+                let localVariance = localConfidences.map { pow($0 - localMean, 2) }.reduce(0, +) / Double(localConfidences.count)
+                let localStdDev = sqrt(localVariance)
+
+                // 局部自适应阈值
+                let localThreshold = max(
+                    adaptiveThreshold * 0.9,
+                    localMean + 1.5 * localStdDev  // 使用 1.5 倍标准差（更宽松）
+                )
+
+                // 如果峰值置信度高于局部阈值，保留
+                if peak.confidence >= localThreshold {
+                    filtered.append(peak)
+                }
+            } else {
+                // 窗口内峰值太少，使用全局阈值
+                if peak.confidence >= adaptiveThreshold {
+                    filtered.append(peak)
+                }
+            }
+        }
+
+        return filtered
+    }
 
     /// 后处理峰值：过滤和合并（优化：减少误合并）
     private func postProcessPeaks(_ peaks: [AudioPeak]) -> [AudioPeak] {

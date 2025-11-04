@@ -76,6 +76,89 @@ actor RallyDetectionEngine {
 
     // MARK: - Audio-Only Detection
 
+    /// 峰值间隔统计量
+    struct IntervalStatistics {
+        let mean: Double              // 平均间隔
+        let stdDev: Double           // 标准差
+        let median: Double           // 中位数
+        let percentile75: Double     // 75分位数
+        let percentile90: Double     // 90分位数
+        let percentile95: Double     // 95分位数
+        let rallyBoundaryThreshold: Double  // 动态回合边界阈值
+        let maxHitInterval: Double          // 动态最大击球间隔
+    }
+
+    /// 计算峰值间隔的统计量，用于动态确定聚类阈值
+    private func calculateIntervalStatistics(peaks: [AudioPeak]) -> IntervalStatistics {
+        guard peaks.count >= 2 else {
+            // 峰值太少，返回默认值
+            return IntervalStatistics(
+                mean: 2.0,
+                stdDev: 1.0,
+                median: 2.0,
+                percentile75: 3.0,
+                percentile90: 5.0,
+                percentile95: 8.0,
+                rallyBoundaryThreshold: 12.0,
+                maxHitInterval: 5.5
+            )
+        }
+
+        // 计算所有相邻峰值的时间间隔
+        var intervals: [Double] = []
+        for i in 1..<peaks.count {
+            let interval = peaks[i].time - peaks[i-1].time
+            intervals.append(interval)
+        }
+
+        // 排序以便计算分位数
+        let sortedIntervals = intervals.sorted()
+
+        // 计算均值
+        let mean = intervals.reduce(0, +) / Double(intervals.count)
+
+        // 计算标准差
+        let variance = intervals.map { pow($0 - mean, 2) }.reduce(0, +) / Double(intervals.count)
+        let stdDev = sqrt(variance)
+
+        // 计算中位数
+        let medianIndex = sortedIntervals.count / 2
+        let median = sortedIntervals.count % 2 == 0 ?
+            (sortedIntervals[medianIndex - 1] + sortedIntervals[medianIndex]) / 2.0 :
+            sortedIntervals[medianIndex]
+
+        // 计算分位数
+        func percentile(_ p: Double) -> Double {
+            let index = Int(Double(sortedIntervals.count) * p)
+            return sortedIntervals[min(index, sortedIntervals.count - 1)]
+        }
+
+        let p75 = percentile(0.75)
+        let p90 = percentile(0.90)
+        let p95 = percentile(0.95)
+
+        // 动态确定回合边界阈值
+        // 使用 95 分位数或均值 + 3×标准差，取较小值，但不小于 8 秒
+        let statisticalBoundary = min(p95, mean + 3.0 * stdDev)
+        let rallyBoundaryThreshold = max(8.0, min(statisticalBoundary, 15.0))  // 8-15秒范围
+
+        // 动态确定最大击球间隔
+        // 使用 75 分位数或均值 + 1.5×标准差，取较小值，但不小于 4 秒
+        let statisticalMaxHit = min(p75, mean + 1.5 * stdDev)
+        let maxHitInterval = max(4.0, min(statisticalMaxHit, 7.0))  // 4-7秒范围
+
+        return IntervalStatistics(
+            mean: mean,
+            stdDev: stdDev,
+            median: median,
+            percentile75: p75,
+            percentile90: p90,
+            percentile95: p95,
+            rallyBoundaryThreshold: rallyBoundaryThreshold,
+            maxHitInterval: maxHitInterval
+        )
+    }
+
     private func detectRalliesUsingAudio(audioResult: AudioAnalysisResult) -> [Rally] {
         // 临时启用调试日志（仅在峰值数量较少时输出详细信息）
         let debugLogging = true
@@ -119,8 +202,17 @@ actor RallyDetectionEngine {
             return detectRalliesWithSimpleClustering(peaks: peaks)
         }
 
-        // 使用改进的时序聚类
-        let clusters = performImprovedTemporalClustering(peaks: filteredPeaks)
+        // 计算峰值间隔统计量，用于动态确定聚类阈值
+        let intervalStats = calculateIntervalStatistics(peaks: filteredPeaks)
+
+        if debugLogging && detailedLogging {
+            print("📊 [RallyDetection] 间隔统计: 均值=\(String(format: "%.2f", intervalStats.mean))s, 标准差=\(String(format: "%.2f", intervalStats.stdDev))s")
+            print("📊 [RallyDetection] 中位数=\(String(format: "%.2f", intervalStats.median))s, P75=\(String(format: "%.2f", intervalStats.percentile75))s, P95=\(String(format: "%.2f", intervalStats.percentile95))s")
+            print("🎯 [RallyDetection] 动态阈值: 回合边界=\(String(format: "%.2f", intervalStats.rallyBoundaryThreshold))s, 最大击球间隔=\(String(format: "%.2f", intervalStats.maxHitInterval))s")
+        }
+
+        // 使用改进的时序聚类（带统计阈值）
+        let clusters = performImprovedTemporalClustering(peaks: filteredPeaks, intervalStats: intervalStats)
         
         if debugLogging {
             print("🔍 [RallyDetection] 时序聚类结果: \(clusters.count) 个簇")
@@ -202,26 +294,29 @@ actor RallyDetectionEngine {
         return config.audioConfidenceThreshold
     }
 
-    /// 改进的时序聚类（考虑峰值间隔和密度）
-    private func performImprovedTemporalClustering(peaks: [AudioPeak]) -> [[AudioPeak]] {
+    /// 改进的时序聚类（考虑峰值间隔和密度，使用动态统计阈值）
+    private func performImprovedTemporalClustering(
+        peaks: [AudioPeak],
+        intervalStats: IntervalStatistics
+    ) -> [[AudioPeak]] {
         guard !peaks.isEmpty else { return [] }
-        
+
         var clusters: [[AudioPeak]] = []
         var currentCluster: [AudioPeak] = [peaks[0]]
-        
+
         for i in 1..<peaks.count {
             let currentPeak = peaks[i]
             let previousPeak = peaks[i-1]
             let timeInterval = currentPeak.time - previousPeak.time
-            
-            // 动态间隔判断：根据当前簇的状态和击球间隔是否合理
+
+            // 动态间隔判断：根据当前簇的状态、击球间隔和统计阈值
             let shouldCluster = shouldClusterPeaks(
                 previous: previousPeak,
                 current: currentPeak,
                 currentCluster: currentCluster,
-                defaultInterval: config.maxHitInterval
+                intervalStats: intervalStats
             )
-            
+
             if shouldCluster {
                 currentCluster.append(currentPeak)
             } else {
@@ -232,71 +327,73 @@ actor RallyDetectionEngine {
                 currentCluster = [currentPeak]
             }
         }
-        
+
         // 保存最后一个簇
         if currentCluster.count >= config.minHitCount {
             clusters.append(currentCluster)
         }
-        
+
         // 回溯合并：检查相邻簇是否可以合并
         return mergeAdjacentClusters(clusters)
     }
 
-    /// 判断两个峰值是否应该聚为一簇
+    /// 判断两个峰值是否应该聚为一簇（使用动态统计阈值）
     /// - Parameters:
     ///   - previous: 前一个峰值
     ///   - current: 当前峰值
     ///   - currentCluster: 当前簇中的所有峰值（用于判断簇的状态）
-    ///   - defaultInterval: 默认间隔阈值
+    ///   - intervalStats: 峰值间隔统计量（动态阈值）
     private func shouldClusterPeaks(
         previous: AudioPeak,
         current: AudioPeak,
         currentCluster: [AudioPeak],
-        defaultInterval: Double
+        intervalStats: IntervalStatistics
     ) -> Bool {
         let timeInterval = current.time - previous.time
-        
+
         // 如果间隔很短（<0.3秒），可能是同一击球的不同峰值，应该合并
         if timeInterval < 0.3 {
             return true
         }
-        
-        // 回合边界判断：间隔超过12秒，认为是真正的回合结束
-        // 根据调研，网球回合平均时长5-10秒，回合之间的间隔通常在10秒以上
-        let rallyBoundaryThreshold = 12.0
-        if timeInterval > rallyBoundaryThreshold {
+
+        // 回合边界判断：使用动态统计阈值（替代固定的 12 秒）
+        // 根据视频特性自动调整，回合之间的间隔通常远大于回合内击球间隔
+        if timeInterval > intervalStats.rallyBoundaryThreshold {
             return false
         }
-        
-        // 动态间隔判断：根据当前簇的状态调整阈值
+
+        // 动态间隔判断：根据当前簇的状态和统计阈值调整
         let clusterHitCount = currentCluster.count
-        let clusterDuration = currentCluster.isEmpty ? 0.0 : 
+        let clusterDuration = currentCluster.isEmpty ? 0.0 :
             (currentCluster.last!.time - currentCluster.first!.time)
-        
+
+        // 使用动态最大击球间隔（基于统计分析）
+        let baseInterval = intervalStats.maxHitInterval
+
         // 如果当前簇已经有足够的击球（>= 4个），说明回合在进行中
-        // 允许稍长的间隔（适应发球准备、换边等），但不超过8秒
+        // 允许稍长的间隔（适应发球准备、换边等）
         if clusterHitCount >= 4 {
-            // 回合进行中，允许更长的间隔，但有限制
-            let rallyInProgressInterval = min(defaultInterval * 1.15, 7.0)  // 最多7秒
+            // 回合进行中，允许更长的间隔，但不超过动态阈值的 1.3 倍
+            let rallyInProgressInterval = min(baseInterval * 1.3, intervalStats.percentile90)
             if timeInterval <= rallyInProgressInterval {
                 return true
             }
         } else {
             // 簇刚开始形成，使用标准间隔阈值
             // 允许稍微长一点的间隔以适应发球准备
-            let startInterval = min(defaultInterval * 1.1, 6.0)  // 最多6秒
+            let startInterval = min(baseInterval * 1.2, intervalStats.percentile75)
             if timeInterval <= startInterval {
                 return true
             }
         }
-        
+
         // 如果两个峰值置信度都很高，且间隔在合理范围内，应该聚为一簇
         if previous.confidence > 0.7 && current.confidence > 0.7 {
-            return timeInterval <= defaultInterval * 1.1
+            return timeInterval <= baseInterval * 1.2
         }
-        
-        // 默认使用配置的间隔
-        return timeInterval <= defaultInterval
+
+        // 默认使用统计的最大击球间隔
+        return timeInterval <= baseInterval
     }
     
     /// 合并相邻的回合（如果它们实际上属于同一个回合）
