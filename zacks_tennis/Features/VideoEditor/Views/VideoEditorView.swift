@@ -33,7 +33,8 @@ struct VideoEditorView: View {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     PhotosPicker(
                         selection: $selectedPhotoItem,
-                        matching: .videos
+                        matching: .videos,
+                        preferredItemEncoding: .current  // 🚀 优化：使用当前编码，避免自动转码
                     ) {
                         Image(systemName: "plus.circle.fill")
                             .font(.title2)

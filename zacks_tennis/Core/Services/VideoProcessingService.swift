@@ -24,57 +24,120 @@ class VideoProcessingService {
 
     // MARK: - 视频导入
 
-    /// 从 URL 导入视频并创建 Video 模型
+    /// 从 URL 导入视频并创建 Video 模型（旧版本，保留兼容性）
     func importVideo(from url: URL, title: String) async throws -> Video {
-        let asset = AVAsset(url: url)
+        let fileName = "\(UUID().uuidString).\(url.pathExtension)"
+        let destinationURL = getDocumentsDirectory().appendingPathComponent(fileName)
 
-        // 获取视频信息
-        let duration = try await asset.load(.duration)
-        let tracks = try await asset.load(.tracks)
+        print("📁 复制视频到 Documents 目录")
+        print("   源: \(url.path)")
+        print("   目标: \(destinationURL.path)")
 
-        guard let videoTrack = tracks.first(where: { $0.mediaType == .video }) else {
+        // 如果目标文件已存在，先删除
+        if FileManager.default.fileExists(atPath: destinationURL.path) {
+            try? FileManager.default.removeItem(at: destinationURL)
+        }
+
+        try FileManager.default.copyItem(at: url, to: destinationURL)
+
+        // 验证复制成功
+        guard FileManager.default.fileExists(atPath: destinationURL.path),
+              FileManager.default.isReadableFile(atPath: destinationURL.path) else {
+            throw VideoError.exportFailedWithReason("视频文件复制失败，无法访问目标文件")
+        }
+
+        print("   ✅ 视频文件复制成功")
+
+        // 使用新方法读取元数据
+        return try await importVideoFromExistingFile(
+            at: destinationURL,
+            fileName: fileName,
+            title: title,
+            progressHandler: nil
+        )
+    }
+
+    /// 从已存在的文件导入视频（优化版本）
+    /// - Parameters:
+    ///   - url: 已在Documents目录的文件URL
+    ///   - fileName: 文件名（用于存储）
+    ///   - title: 视频标题
+    ///   - progressHandler: 进度回调（0.0-1.0）
+    /// - Returns: Video模型
+    func importVideoFromExistingFile(
+        at url: URL,
+        fileName: String,
+        title: String,
+        progressHandler: ((Double) -> Void)? = nil
+    ) async throws -> Video {
+
+        print("📊 读取视频元数据")
+        print("   文件: \(url.path)")
+
+        // 验证文件存在
+        guard FileManager.default.fileExists(atPath: url.path),
+              FileManager.default.isReadableFile(atPath: url.path) else {
+            throw VideoError.exportFailedWithReason("视频文件不存在或不可读")
+        }
+
+        // 🚀 优化：使用AVURLAsset并设置加载选项
+        let options: [String: Any] = [
+            AVURLAssetPreferPreciseDurationAndTimingKey: false,  // 使用快速估算
+            AVURLAssetAllowsCellularAccessKey: true
+        ]
+        let asset = AVURLAsset(url: url, options: options)
+
+        progressHandler?(0.1)
+
+        // 🚀 优化：并发加载视频信息
+        async let duration = asset.load(.duration)
+        async let tracks = asset.load(.tracks)
+
+        let (loadedDuration, loadedTracks) = try await (duration, tracks)
+
+        progressHandler?(0.4)
+
+        guard let videoTrack = loadedTracks.first(where: { $0.mediaType == .video }) else {
             throw VideoError.noVideoTrack
         }
 
         let naturalSize = try await videoTrack.load(.naturalSize)
         let fileSize = try getFileSize(from: url)
 
-        // 复制到 Documents 目录
-        let fileName = "\(UUID().uuidString).\(url.pathExtension)"
-        let destinationURL = getDocumentsDirectory().appendingPathComponent(fileName)
-        
-        print("📁 复制视频到 Documents 目录")
-        print("   源: \(url.path)")
-        print("   目标: \(destinationURL.path)")
-        
-        // 如果目标文件已存在，先删除
-        if FileManager.default.fileExists(atPath: destinationURL.path) {
-            try? FileManager.default.removeItem(at: destinationURL)
-        }
-        
-        try FileManager.default.copyItem(at: url, to: destinationURL)
-        
-        // 验证复制成功
-        guard FileManager.default.fileExists(atPath: destinationURL.path),
-              FileManager.default.isReadableFile(atPath: destinationURL.path) else {
-            throw VideoError.exportFailedWithReason("视频文件复制失败，无法访问目标文件")
-        }
-        
-        print("   ✅ 视频文件复制成功")
+        progressHandler?(0.7)
 
-        // 生成缩略图
-        let thumbnailPath = try await generateThumbnail(from: asset, videoID: fileName)
+        print("   ✅ 元数据读取成功")
+        print("      时长: \(String(format: "%.2f", loadedDuration.seconds))秒")
+        print("      分辨率: \(Int(naturalSize.width))x\(Int(naturalSize.height))")
+        print("      文件大小: \(ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file))")
 
-        // 创建 Video 模型
+        // 创建 Video 模型（不生成缩略图，后台异步生成）
         let video = Video(
             title: title,
             originalFilePath: fileName,
-            duration: duration.seconds,
+            duration: loadedDuration.seconds,
             width: Int(naturalSize.width),
             height: Int(naturalSize.height),
             fileSize: fileSize
         )
-        video.thumbnailPath = thumbnailPath
+
+        progressHandler?(0.9)
+
+        // 🚀 优化：后台异步生成缩略图（不阻塞导入流程）
+        Task.detached(priority: .utility) { [weak self] in
+            guard let self = self else { return }
+            do {
+                let thumbnailPath = try await self.generateThumbnail(from: asset, videoID: fileName)
+                await MainActor.run {
+                    video.thumbnailPath = thumbnailPath
+                    print("   ✅ 缩略图生成完成（后台）")
+                }
+            } catch {
+                print("   ⚠️ 缩略图生成失败: \(error.localizedDescription)")
+            }
+        }
+
+        progressHandler?(1.0)
 
         return video
     }
@@ -631,6 +694,9 @@ class VideoProcessingService {
     private func generateThumbnail(from asset: AVAsset, videoID: String) async throws -> String {
         let imageGenerator = AVAssetImageGenerator(asset: asset)
         imageGenerator.appliesPreferredTrackTransform = true
+
+        // 🚀 优化：限制缩略图最大尺寸，减少解码时间和内存占用
+        imageGenerator.maximumSize = CGSize(width: 400, height: 400)
 
         let time = CMTime(seconds: 1.0, preferredTimescale: 600)
         let cgImage = try await imageGenerator.image(at: time).image

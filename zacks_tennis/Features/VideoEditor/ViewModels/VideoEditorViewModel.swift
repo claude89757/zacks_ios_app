@@ -123,8 +123,8 @@ class VideoEditorViewModel {
         loadVideos()
 
         do {
-            // 🔥 阶段1: 获取视频文件URL（0-30%）
-            placeholderVideo.updateImportProgress(0.1, stage: "正在从照片库加载视频...")
+            // 🔥 阶段1: 获取视频文件URL（0-10%）
+            placeholderVideo.updateImportProgress(0.05, stage: "正在从照片库加载视频...")
             try? modelContext?.save()
 
             // 使用自定义的 MovieFile Transferable 来获取文件 URL（不加载到内存）
@@ -136,16 +136,54 @@ class VideoEditorViewModel {
                 throw VideoError.exportFailed
             }
 
-            placeholderVideo.updateImportProgress(0.3, stage: "视频加载完成，准备导入...")
+            placeholderVideo.updateImportProgress(0.1, stage: "视频接收成功，开始复制到本地...")
             try? modelContext?.save()
 
-            // 🔥 阶段2: 导入视频文件（30-90%）
-            let importedVideo = try await VideoProcessingService.shared.importVideo(from: movieFile.url, title: title)
+            // 🔥 阶段2: 复制文件到Documents目录（10-50%，带实时进度）
+            let fileName = "\(UUID().uuidString).\(movieFile.url.pathExtension)"
+            let destinationURL = getDocumentsDirectory().appendingPathComponent(fileName)
 
-            placeholderVideo.updateImportProgress(0.9, stage: "正在保存到数据库...")
+            print("📁 开始复制视频到 Documents 目录")
+            print("   源: \(movieFile.url.path)")
+            print("   目标: \(destinationURL.path)")
+
+            let copier = AsyncFileCopier()
+            let finalURL = try await copier.copyFile(
+                from: movieFile.url,
+                to: destinationURL
+            ) { copyProgress in
+                // 将文件复制进度映射到10%-50%
+                let overallProgress = 0.1 + (copyProgress * 0.4)
+                placeholderVideo.updateImportProgress(
+                    overallProgress,
+                    stage: String(format: "正在复制视频文件... %.0f%%", copyProgress * 100)
+                )
+                try? self.modelContext?.save()
+            }
+
+            placeholderVideo.updateImportProgress(0.5, stage: "视频复制完成，正在读取元数据...")
             try? modelContext?.save()
 
-            // 🔥 阶段3: 更新占位视频的实际数据（90-100%）
+            // 🔥 阶段3: 读取视频元数据（50-70%，不再复制文件）
+            let importedVideo = try await VideoProcessingService.shared.importVideoFromExistingFile(
+                at: finalURL,
+                fileName: fileName,
+                title: title,
+                progressHandler: { metadataProgress in
+                    // 将元数据加载进度映射到50%-70%
+                    let overallProgress = 0.5 + (metadataProgress * 0.2)
+                    placeholderVideo.updateImportProgress(
+                        overallProgress,
+                        stage: "正在读取视频信息..."
+                    )
+                    try? self.modelContext?.save()
+                }
+            )
+
+            placeholderVideo.updateImportProgress(0.7, stage: "正在保存到数据库...")
+            try? modelContext?.save()
+
+            // 🔥 阶段4: 更新占位视频的实际数据（70-100%）
             placeholderVideo.originalFilePath = importedVideo.originalFilePath
             placeholderVideo.thumbnailPath = importedVideo.thumbnailPath
             placeholderVideo.duration = importedVideo.duration
@@ -159,6 +197,8 @@ class VideoEditorViewModel {
             try? modelContext?.save()
             loadVideos()
 
+            print("✅ 视频导入完成: \(title)")
+
             // 🔥 后台自动分析（不阻塞 UI）
             startBackgroundAnalysis(for: placeholderVideo)
 
@@ -169,6 +209,11 @@ class VideoEditorViewModel {
             loadVideos()
             handleError(error)
         }
+    }
+
+    /// 获取Documents目录
+    private func getDocumentsDirectory() -> URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
 
     // MARK: - Video Analysis
@@ -823,6 +868,7 @@ class VideoEditorViewModel {
 // MARK: - Movie Transferable
 
 /// 自定义的 Transferable 类型，用于从 PhotosPickerItem 获取视频文件 URL
+/// 优化版本：直接返回系统提供的临时文件URL，避免不必要的复制
 struct MovieFile: Transferable {
     let url: URL
 
@@ -830,59 +876,22 @@ struct MovieFile: Transferable {
         FileRepresentation(contentType: .movie) { movie in
             SentTransferredFile(movie.url)
         } importing: { received in
-            print("📥 开始接收视频文件")
+            print("📥 接收视频文件")
             print("   源文件: \(received.file.path)")
-            
+
             // 验证源文件存在
             guard FileManager.default.fileExists(atPath: received.file.path) else {
                 print("   ❌ 错误: 源文件不存在")
                 throw VideoError.exportFailedWithReason("源文件不存在")
             }
-            
-            // 获取文件大小
+
+            // 获取文件大小（用于日志）
             let fileSize = try FileManager.default.attributesOfItem(atPath: received.file.path)[.size] as? Int64 ?? 0
             print("   文件大小: \(ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file))")
-            
-            // 将接收到的文件复制到临时目录（使用更稳定的命名）
-            let timestamp = Date().timeIntervalSince1970
-            let tempFileName = "import_\(Int(timestamp))_\(UUID().uuidString)"
-            let tempURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent(tempFileName)
-                .appendingPathExtension(received.file.pathExtension.isEmpty ? "mov" : received.file.pathExtension)
-            
-            print("   目标临时路径: \(tempURL.path)")
+            print("   ✅ 视频文件接收成功，准备导入")
 
-            // 如果目标文件已存在，先删除
-            if FileManager.default.fileExists(atPath: tempURL.path) {
-                try? FileManager.default.removeItem(at: tempURL)
-            }
-
-            // 复制文件
-            do {
-                try FileManager.default.copyItem(at: received.file, to: tempURL)
-                print("   ✅ 文件复制成功")
-                
-                // 验证复制后的文件存在且可读
-                guard FileManager.default.fileExists(atPath: tempURL.path),
-                      FileManager.default.isReadableFile(atPath: tempURL.path) else {
-                    print("   ❌ 错误: 复制后的文件不可读")
-                    throw VideoError.exportFailedWithReason("复制后的文件不可读")
-                }
-                
-                let copiedSize = try FileManager.default.attributesOfItem(atPath: tempURL.path)[.size] as? Int64 ?? 0
-                print("   复制后文件大小: \(ByteCountFormatter.string(fromByteCount: copiedSize, countStyle: .file))")
-                
-                // 验证文件大小一致（不一致时提示，但继续流程）
-                if copiedSize != fileSize {
-                    print("   ⚠️ 警告: 文件大小不匹配 (源: \(fileSize) bytes, 复制: \(copiedSize) bytes)")
-                }
-                
-            } catch {
-                print("   ❌ 文件复制失败: \(error.localizedDescription)")
-                throw VideoError.exportFailedWithReason("文件复制失败: \(error.localizedDescription)")
-            }
-            
-            return Self(url: tempURL)
+            // 直接返回系统提供的临时文件URL（不做额外复制）
+            return Self(url: received.file)
         }
     }
 }
