@@ -35,6 +35,9 @@ final class Video {
     /// 文件大小（字节）
     var fileSize: Int64
 
+    /// 视频帧率（fps）
+    var framerate: Float
+
     /// 创建时间
     var createdAt: Date
 
@@ -102,7 +105,8 @@ final class Video {
         duration: Double,
         width: Int,
         height: Int,
-        fileSize: Int64
+        fileSize: Int64,
+        framerate: Float = 0.0
     ) {
         self.id = UUID()
         self.title = title
@@ -111,6 +115,7 @@ final class Video {
         self.width = width
         self.height = height
         self.fileSize = fileSize
+        self.framerate = framerate
         self.createdAt = Date()
 
         // 初始化 AI 分析状态
@@ -146,9 +151,42 @@ struct ExportedFile: Codable, Identifiable {
 
 // MARK: - 便利方法
 extension Video {
-    /// 获取视频分辨率文本
+    /// 获取视频分辨率文本（原始格式）
     var resolutionText: String {
         "\(width) × \(height)"
+    }
+
+    /// 获取友好的分辨率显示文本（4K、1080p等）
+    var resolutionDisplayText: String {
+        let h = height
+        if h >= 2160 {
+            return "4K"
+        } else if h >= 1440 {
+            return "2K"
+        } else if h >= 1080 {
+            return "1080p"
+        } else if h >= 720 {
+            return "720p"
+        } else if h >= 480 {
+            return "480p"
+        } else {
+            return "\(width)×\(height)"
+        }
+    }
+
+    /// 获取帧率显示文本
+    var framerateText: String {
+        if framerate > 0 {
+            return "\(Int(framerate))fps"
+        }
+        return ""
+    }
+
+    /// 获取日期显示文本（YYYY-MM-DD 格式）
+    var dateText: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: createdAt)
     }
 
     /// 获取文件大小文本

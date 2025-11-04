@@ -165,10 +165,23 @@ struct VideoRowView: View {
                         .font(.headline)
                         .lineLimit(1)
 
-                    HStack {
+                    HStack(spacing: 4) {
                         Text(video.durationText)
+
                         Text("·")
-                        Text(video.resolutionText)
+
+                        // 分辨率（确保一定显示）
+                        if !video.resolutionDisplayText.isEmpty {
+                            Text(video.resolutionDisplayText)
+                        } else {
+                            Text("\(video.width)×\(video.height)")
+                        }
+
+                        // 帧率（如果有）
+                        if !video.framerateText.isEmpty {
+                            Text("·")
+                            Text(video.framerateText)
+                        }
                     }
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -194,7 +207,7 @@ struct VideoRowView: View {
                             .foregroundColor(.green)
                     }
 
-                    Text(video.createdAt, style: .date)
+                    Text(video.dateText)
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }

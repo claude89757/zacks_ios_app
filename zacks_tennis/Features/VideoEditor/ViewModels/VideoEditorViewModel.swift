@@ -868,7 +868,7 @@ class VideoEditorViewModel {
 // MARK: - Movie Transferable
 
 /// 自定义的 Transferable 类型，用于从 PhotosPickerItem 获取视频文件 URL
-/// 优化版本：直接返回系统提供的临时文件URL，避免不必要的复制
+/// 修复版本：复制到稳定的临时位置（received.file在闭包结束后可能失效）
 struct MovieFile: Transferable {
     let url: URL
 
@@ -879,19 +879,57 @@ struct MovieFile: Transferable {
             print("📥 接收视频文件")
             print("   源文件: \(received.file.path)")
 
+            // 🔑 关键：访问安全作用域资源（PhotosPicker提供的临时文件需要）
+            let sourceURL = received.file
+            let accessGranted = sourceURL.startAccessingSecurityScopedResource()
+            defer {
+                if accessGranted {
+                    sourceURL.stopAccessingSecurityScopedResource()
+                }
+            }
+
             // 验证源文件存在
-            guard FileManager.default.fileExists(atPath: received.file.path) else {
+            guard FileManager.default.fileExists(atPath: sourceURL.path) else {
                 print("   ❌ 错误: 源文件不存在")
                 throw VideoError.exportFailedWithReason("源文件不存在")
             }
 
             // 获取文件大小（用于日志）
-            let fileSize = try FileManager.default.attributesOfItem(atPath: received.file.path)[.size] as? Int64 ?? 0
+            let fileSize = try FileManager.default.attributesOfItem(atPath: sourceURL.path)[.size] as? Int64 ?? 0
             print("   文件大小: \(ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file))")
-            print("   ✅ 视频文件接收成功，准备导入")
 
-            // 直接返回系统提供的临时文件URL（不做额外复制）
-            return Self(url: received.file)
+            // 🔑 关键修复：必须复制到稳定的临时位置
+            // 因为 received.file 在 importing 闭包结束后可能被系统删除
+            let timestamp = Date().timeIntervalSince1970
+            let tempFileName = "import_\(Int(timestamp))_\(UUID().uuidString)"
+            let tempURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent(tempFileName)
+                .appendingPathExtension(sourceURL.pathExtension.isEmpty ? "mov" : sourceURL.pathExtension)
+
+            print("   目标临时路径: \(tempURL.path)")
+
+            // 如果目标文件已存在，先删除
+            if FileManager.default.fileExists(atPath: tempURL.path) {
+                try? FileManager.default.removeItem(at: tempURL)
+            }
+
+            // 复制文件到稳定的临时位置
+            do {
+                try FileManager.default.copyItem(at: sourceURL, to: tempURL)
+                print("   ✅ 文件复制到临时位置成功")
+
+                // 验证复制后的文件存在且可读
+                guard FileManager.default.fileExists(atPath: tempURL.path),
+                      FileManager.default.isReadableFile(atPath: tempURL.path) else {
+                    print("   ❌ 错误: 复制后的文件不可读")
+                    throw VideoError.exportFailedWithReason("复制后的文件不可读")
+                }
+            } catch {
+                print("   ❌ 文件复制失败: \(error.localizedDescription)")
+                throw VideoError.exportFailedWithReason("文件复制失败: \(error.localizedDescription)")
+            }
+
+            return Self(url: tempURL)
         }
     }
 }

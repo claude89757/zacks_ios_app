@@ -164,6 +164,8 @@ actor RallyDetectionEngine {
         let debugLogging = true
         let detailedLogging = audioResult.hitSounds.count < 100 // 峰值少时才详细日志
         
+        // 只进行一次置信度过滤，使用统一的阈值0.55
+        // 移除了重复的自适应阈值过滤，减少累积损失
         let peaks = audioResult.hitSounds
             .filter { $0.confidence >= config.audioConfidenceThreshold }
             .sorted { $0.time < $1.time }
@@ -186,24 +188,8 @@ actor RallyDetectionEngine {
             }
         }
 
-        // 自适应阈值：根据音频质量调整
-        let adaptiveThreshold = calculateAdaptiveThreshold(peaks: peaks)
-        let filteredPeaks = peaks.filter { $0.confidence >= adaptiveThreshold }
-
-        if debugLogging {
-            print("🔍 [RallyDetection] 自适应阈值: \(String(format: "%.2f", adaptiveThreshold)), 过滤后: \(filteredPeaks.count) 个峰值")
-        }
-
-        guard !filteredPeaks.isEmpty else {
-            // 如果自适应阈值过滤后没有峰值，使用原始阈值
-            if debugLogging {
-                print("🔍 [RallyDetection] 自适应阈值过滤后无峰值，使用简单聚类（降级方案）")
-            }
-            return detectRalliesWithSimpleClustering(peaks: peaks)
-        }
-
         // 计算峰值间隔统计量，用于动态确定聚类阈值
-        let intervalStats = calculateIntervalStatistics(peaks: filteredPeaks)
+        let intervalStats = calculateIntervalStatistics(peaks: peaks)
 
         if debugLogging && detailedLogging {
             print("📊 [RallyDetection] 间隔统计: 均值=\(String(format: "%.2f", intervalStats.mean))s, 标准差=\(String(format: "%.2f", intervalStats.stdDev))s")
@@ -213,7 +199,7 @@ actor RallyDetectionEngine {
 
         // 使用贝叶斯引导的时序聚类（Phase 2: 无监督ML）
         // 结合贝叶斯变化点检测和统计阈值，优化回合边界准确率
-        let clusters = performBayesianGuidedClustering(peaks: filteredPeaks, intervalStats: intervalStats)
+        let clusters = performBayesianGuidedClustering(peaks: peaks, intervalStats: intervalStats)
         
         if debugLogging {
             print("🔍 [RallyDetection] 时序聚类结果: \(clusters.count) 个簇")
@@ -435,14 +421,21 @@ actor RallyDetectionEngine {
             let changePointProb = i-1 < changePoints.count ? changePoints[i-1].probability : 0.0
             let isHighProbChangePoint = changePointProb >= ChangePointResult.confidenceThreshold
 
-            // 混合决策：贝叶斯概率 + 统计阈值
-            let shouldSplit = isHighProbChangePoint ||
-                shouldClusterPeaks(
-                    previous: previousPeak,
-                    current: currentPeak,
-                    currentCluster: currentCluster,
-                    intervalStats: intervalStats
-                ) == false
+            // 统计方法判断
+            let shouldClusterStatistically = shouldClusterPeaks(
+                previous: previousPeak,
+                current: currentPeak,
+                currentCluster: currentCluster,
+                intervalStats: intervalStats
+            )
+            let statisticalShouldSplit = !shouldClusterStatistically
+
+            // 🔧 修复混合决策逻辑（Critical Bug修复）
+            // 策略：统计方法为主（基于固定阈值更可靠），贝叶斯辅助修正
+            // 1. 统计认为分割 + 贝叶斯不强烈反对（>0.3） → 分割
+            // 2. 贝叶斯高度确定（>0.7） → 分割
+            let shouldSplit = (statisticalShouldSplit && changePointProb > 0.3) ||
+                              (changePointProb > 0.7)
 
             if shouldSplit {
                 // 保存当前簇，开始新簇
@@ -602,21 +595,30 @@ actor RallyDetectionEngine {
     }
 
     /// 验证回合合理性（过滤误报）
+    /// 🔧 修改为OR逻辑：支持标准回合、短快回合、长慢回合
     private func isValidRally(rally: Rally, cluster: [AudioPeak]) -> Bool {
-        // 1. 时长检查
-        guard rally.duration >= config.minRallyDuration else { return false }
-        
-        // 2. 击球次数检查
-        guard cluster.count >= config.minHitCount else { return false }
-        
-        // 3. 击球间隔合理性检查（放宽范围以适应更长的间隔）
+        // 计算击球密度（用于判断回合类型）
+        let hitDensity = Double(cluster.count) / rally.duration
+
+        // 定义三种有效的回合模式（满足任一即可）
+        // P1修复：降低要求，提高召回率
+        let standardRally = cluster.count >= 3 && rally.duration >= 2.5  // 标准回合：>= 3击，>= 2.5秒（原4击，3秒）
+        let shortFastRally = cluster.count >= 2 && hitDensity >= 0.5     // 短快回合：>= 2击，高密集（原3击，0.4）
+        let longSlowRally = cluster.count >= 3 && rally.duration >= 4.0  // 长慢回合：>= 3击，>= 4秒（原5秒）
+
+        // 至少满足一种回合模式
+        guard standardRally || shortFastRally || longSlowRally else {
+            return false
+        }
+
+        // 击球间隔合理性检查（所有类型回合都需要通过）
         if cluster.count > 1 {
             let intervals = zip(cluster.dropFirst(), cluster).map { $0.time - $1.time }
             let avgInterval = intervals.reduce(0, +) / Double(intervals.count)
-            
-            // 平均击球间隔应该在合理范围内（0.2秒到7秒，适应回合内的正常暂停）
+
+            // 平均击球间隔应该在合理范围内（0.2秒到7秒）
             guard avgInterval >= 0.2 && avgInterval <= 7.0 else { return false }
-            
+
             // 检查是否有异常长的间隔（可能是误检）
             // 放宽条件：允许有1-2个间隔超过阈值（可能是回合中的暂停）
             let longIntervals = intervals.filter { $0 > config.maxHitInterval * 1.3 }
@@ -624,12 +626,7 @@ actor RallyDetectionEngine {
                 return false
             }
         }
-        
-        // 4. 击球密度检查（回合内击球应该相对密集）
-        // 至少每5秒一次击球，适应更长的间隔
-        let hitDensity = Double(cluster.count) / rally.duration
-        guard hitDensity >= 0.2 else { return false } // 至少每5秒一次击球
-        
+
         return true
     }
 
@@ -980,9 +977,9 @@ struct RallyDetectionConfiguration {
     /// 默认配置：综合场景下的折中方案
     static let `default` = RallyDetectionConfiguration(
         minRallyDuration: 3.0,
-        audioConfidenceThreshold: 0.65,  // 提高置信度阈值，过滤低质量峰值（原来0.6）
+        audioConfidenceThreshold: 0.50,  // Critical修复：与AudioAnalyzer统一为0.50（原0.55）
         maxHitInterval: 5.5,  // 回合内正常击球间隔上限（5-6秒，适应发球准备等）
-        minHitCount: 4,
+        minHitCount: 3,  // Critical修复：与isValidRally统一为3（原4）
         preHitPadding: 1.5,   // 保留发球/准备动作（1.5秒）
         postHitPadding: 1.8,  // 保留击球后的完整动作（1.8秒）
         enableDebugLogging: false

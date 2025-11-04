@@ -140,7 +140,7 @@ struct VideoDetailView: View {
                 Label("创建时间", systemImage: "calendar")
                     .foregroundColor(.secondary)
                 Spacer()
-                Text(video.createdAt, style: .date)
+                Text(video.dateText)
                     .fontWeight(.medium)
             }
         }

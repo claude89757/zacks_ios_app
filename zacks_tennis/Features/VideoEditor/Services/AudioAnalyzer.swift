@@ -207,12 +207,12 @@ actor AudioAnalyzer: AudioAnalyzing {
         let eventDuration = calculateEventDuration(samples: floatSamples, sampleRate: sampleRate)
 
         // 5b. 时长过滤：击球声的典型持续时间
-        // 合理范围：15ms - 120ms（稍微放宽以适应不同情况）
-        let isValidDuration = eventDuration >= 0.015 && eventDuration <= 0.12
+        // 放宽范围：10ms - 150ms（适应削球、轻击等多种技术）
+        let isValidDuration = eventDuration >= 0.01 && eventDuration <= 0.15
 
         // 如果持续时间明显不合理，直接过滤掉
-        // 但如果置信度特别高（> 0.75），可以放宽时长要求
-        if !isValidDuration && peakAmplitude < 0.6 {
+        // 只在置信度很低时才硬过滤（从0.6降至0.45，减少误过滤）
+        if !isValidDuration && peakAmplitude < 0.45 {
             return nil
         }
 
@@ -879,15 +879,22 @@ actor AudioAnalyzer: AudioAnalyzing {
         // 计算全局统计量
         let confidences = peaks.map { $0.confidence }
         let meanConfidence = confidences.reduce(0, +) / Double(confidences.count)
+
+        // ⚡️ 快速通道：如果整体音频质量很好（高置信度），跳过自适应过滤
+        // 这可以避免误过滤真实击球，减少累积损失
+        if meanConfidence > 0.7 {
+            return peaks
+        }
+
         let variance = confidences.map { pow($0 - meanConfidence, 2) }.reduce(0, +) / Double(confidences.count)
         let stdDev = sqrt(variance)
 
         // 自适应阈值 = 均值 + 调整系数 × 标准差
-        // 使用保守的调整系数 1.0（可以根据实际效果调整）
+        // 降低调整系数：从1.0改为0.8（减少过度过滤）
         let adaptiveThreshold = max(
             config.minimumConfidence * 0.8,  // 最低不低于配置阈值的 80%
             min(
-                meanConfidence + 1.0 * stdDev,  // 统计阈值
+                meanConfidence + 0.8 * stdDev,  // 统计阈值（降低系数）
                 config.minimumConfidence * 1.2   // 最高不超过配置阈值的 120%
             )
         )
@@ -910,10 +917,10 @@ actor AudioAnalyzer: AudioAnalyzing {
                 let localVariance = localConfidences.map { pow($0 - localMean, 2) }.reduce(0, +) / Double(localConfidences.count)
                 let localStdDev = sqrt(localVariance)
 
-                // 局部自适应阈值
+                // 局部自适应阈值（降低系数：从1.5改为1.2）
                 let localThreshold = max(
                     adaptiveThreshold * 0.9,
-                    localMean + 1.5 * localStdDev  // 使用 1.5 倍标准差（更宽松）
+                    localMean + 1.2 * localStdDev  // 使用 1.2 倍标准差（减少过度过滤）
                 )
 
                 // 如果峰值置信度高于局部阈值，保留
@@ -946,8 +953,8 @@ actor AudioAnalyzer: AudioAnalyzing {
                 
                 if timeDiff < config.minimumPeakInterval {
                     // 如果两个峰值都很高（都是明显的击球声），且间隔合理，都保留
-                    // 收紧条件：需要更高的置信度才认为是连续击球
-                    if peak.confidence > 0.65 && current.confidence > 0.65 && timeDiff > 0.12 {
+                    // 统一阈值为0.55（从0.65降低，减少误合并）
+                    if peak.confidence > 0.55 && current.confidence > 0.55 && timeDiff > 0.10 {
                         // 连续击球，都保留
                         filtered.append(current)
                         currentPeak = peak
@@ -992,7 +999,7 @@ struct AudioAnalysisConfiguration {
     /// 默认配置（平衡准确率和召回率）
     static let `default` = AudioAnalysisConfiguration(
         peakThreshold: 0.25,  // 提高阈值，减少误报（原来0.15）
-        minimumConfidence: 0.5,  // 提高置信度阈值，过滤低质量峰值（原来0.35）
+        minimumConfidence: 0.50,  // P1修复：降至0.50，减少AudioAnalyzer过度过滤（原0.55）
         minimumPeakInterval: 0.18  // 增加最小间隔，避免过于密集的误识别（原来0.12）
     )
 

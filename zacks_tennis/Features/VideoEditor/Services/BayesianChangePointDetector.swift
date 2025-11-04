@@ -16,7 +16,8 @@ struct ChangePointResult {
     let isChangePoint: Bool             // 是否为变化点（概率 > 阈值）
 
     /// 置信度阈值（概率超过此值认为是变化点）
-    static let confidenceThreshold: Double = 0.65
+    /// 🔧 统一为中间值0.55（原0.65）
+    static let confidenceThreshold: Double = 0.55
 }
 
 /// 贝叶斯变化点检测器
@@ -48,32 +49,35 @@ class BayesianChangePointDetector {
         let debugLogging: Bool
 
         /// 默认配置
+        /// 🔧 统一参数为中间值，与RallyDetectionEngine协调
         static let `default` = Config(
             hazardRate: 0.05,              // 5% 先验变化概率（适度敏感）
-            withinRallyMean: 1.5,          // 回合内平均 1.5s
+            withinRallyMean: 2.5,          // 回合内平均 2.5s（统一中间值，原1.5s）
             withinRallyStdDev: 0.8,        // 标准差 0.8s
             betweenRallyMean: 10.0,        // 回合间平均 10s
             betweenRallyStdDev: 3.0,       // 标准差 3s
-            minRallyLength: 3,             // 最少 3 个峰值
+            minRallyLength: 3,             // 最少 3 个峰值（统一为3，原配置一致）
             debugLogging: false
         )
 
         /// 自适应配置（基于数据统计）
+        /// 🔧 添加保护上下限，防止极端数据导致参数异常
         static func adaptive(intervalStats: IntervalStatistics) -> Config {
-            // 使用 P75 作为回合内间隔上限
-            let withinMean = min(intervalStats.mean, intervalStats.percentile75)
-            let withinStdDev = max(0.5, intervalStats.stdDev * 0.8)
+            // 使用 P75 作为回合内间隔上限，添加保护范围：0.4-3.0秒
+            // Critical Bug修复：降低下限从0.8→0.4，适应快节奏视频（0.5-0.7秒间隔）
+            let withinMean = max(0.4, min(intervalStats.mean, intervalStats.percentile75, 3.0))
+            let withinStdDev = max(0.3, min(intervalStats.stdDev * 0.8, 1.5))
 
-            // 使用 P90-P95 作为回合间间隔
-            let betweenMean = (intervalStats.percentile90 + intervalStats.percentile95) / 2.0
-            let betweenStdDev = max(2.0, intervalStats.stdDev * 1.5)
+            // 使用 P90-P95 作为回合间间隔，添加保护范围：8-20秒
+            let betweenMean = max(8.0, min((intervalStats.percentile90 + intervalStats.percentile95) / 2.0, 20.0))
+            let betweenStdDev = max(2.0, min(intervalStats.stdDev * 1.5, 5.0))
 
             return Config(
                 hazardRate: 0.05,
-                withinRallyMean: withinMean,
-                withinRallyStdDev: withinStdDev,
-                betweenRallyMean: betweenMean,
-                betweenRallyStdDev: betweenStdDev,
+                withinRallyMean: withinMean,        // 范围：0.8-3.0s
+                withinRallyStdDev: withinStdDev,    // 范围：0.4-1.2s
+                betweenRallyMean: betweenMean,      // 范围：8-20s
+                betweenRallyStdDev: betweenStdDev,  // 范围：2-5s
                 minRallyLength: 3,
                 debugLogging: false
             )

@@ -101,41 +101,41 @@ class VideoProcessingService {
             throw VideoError.noVideoTrack
         }
 
-        let naturalSize = try await videoTrack.load(.naturalSize)
+        // 🚀 并发加载视频轨道信息
+        async let naturalSize = videoTrack.load(.naturalSize)
+        async let nominalFrameRate = videoTrack.load(.nominalFrameRate)
+
+        let (loadedSize, loadedFrameRate) = try await (naturalSize, nominalFrameRate)
         let fileSize = try getFileSize(from: url)
 
         progressHandler?(0.7)
 
         print("   ✅ 元数据读取成功")
         print("      时长: \(String(format: "%.2f", loadedDuration.seconds))秒")
-        print("      分辨率: \(Int(naturalSize.width))x\(Int(naturalSize.height))")
+        print("      分辨率: \(Int(loadedSize.width))x\(Int(loadedSize.height))")
+        print("      帧率: \(Int(loadedFrameRate))fps")
         print("      文件大小: \(ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file))")
 
-        // 创建 Video 模型（不生成缩略图，后台异步生成）
+        progressHandler?(0.8)
+
+        // 生成缩略图（已优化尺寸为400x400，生成很快）
+        print("   🖼️  开始生成缩略图...")
+        let thumbnailPath = try await generateThumbnail(from: asset, videoID: fileName)
+        print("   ✅ 缩略图生成完成")
+
+        progressHandler?(0.95)
+
+        // 创建 Video 模型
         let video = Video(
             title: title,
             originalFilePath: fileName,
             duration: loadedDuration.seconds,
-            width: Int(naturalSize.width),
-            height: Int(naturalSize.height),
-            fileSize: fileSize
+            width: Int(loadedSize.width),
+            height: Int(loadedSize.height),
+            fileSize: fileSize,
+            framerate: loadedFrameRate
         )
-
-        progressHandler?(0.9)
-
-        // 🚀 优化：后台异步生成缩略图（不阻塞导入流程）
-        Task.detached(priority: .utility) { [weak self] in
-            guard let self = self else { return }
-            do {
-                let thumbnailPath = try await self.generateThumbnail(from: asset, videoID: fileName)
-                await MainActor.run {
-                    video.thumbnailPath = thumbnailPath
-                    print("   ✅ 缩略图生成完成（后台）")
-                }
-            } catch {
-                print("   ⚠️ 缩略图生成失败: \(error.localizedDescription)")
-            }
-        }
+        video.thumbnailPath = thumbnailPath
 
         progressHandler?(1.0)
 
