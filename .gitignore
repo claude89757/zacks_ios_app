@@ -84,3 +84,4 @@ Scripts/
 # Temporary images/screenshots
 *.png
 !zacks_tennis/Assets.xcassets/**/*.png
+*.xcuserstate
