@@ -20,7 +20,12 @@
       "mcp__XcodeBuildMCP__install_app_device",
       "mcp__XcodeBuildMCP__list_schemes",
       "mcp__XcodeBuildMCP__list_devices",
-      "mcp__XcodeBuildMCP__start_device_log_cap"
+      "mcp__XcodeBuildMCP__start_device_log_cap",
+      "Bash(git -C /Users/claude89757/ugit/zacks_ios_app diff HEAD -- zacks_tennis/Features/VideoEditor/Views/VideoAnalysisDetailView.swift)",
+      "Bash(tr:*)",
+      "Bash(fold:*)",
+      "Bash(git -C /Users/claude89757/ugit/zacks_ios_app diff HEAD zacks_tennis/Features/VideoEditor/Views/VideoAnalysisDetailView.swift)",
+      "Bash(python3:*)"
     ],
     "deny": [],
     "ask": []

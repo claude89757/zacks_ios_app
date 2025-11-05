@@ -15,8 +15,16 @@ actor AudioAnalyzer: AudioAnalyzing {
 
     // MARK: - Properties
 
-    /// 音频分析配置
-    private let config: AudioAnalysisConfiguration
+    /// 音频分析配置（可更新，以支持智能配置选择）
+    private var config: AudioAnalysisConfiguration
+
+    // MARK: - Diagnostic Properties
+
+    /// 诊断模式开关
+    private var diagnosticMode: Bool = false
+
+    /// 诊断数据收集器
+    private var diagnosticCollector: DiagnosticDataCollector?
 
     // MARK: - Initialization
 
@@ -163,6 +171,39 @@ actor AudioAnalyzer: AudioAnalyzing {
         return AudioAnalysisResult(hitSounds: allPeaks)
     }
 
+    // MARK: - Configuration Methods
+
+    /// 更新音频分析配置
+    /// - Parameter newConfig: 新的配置
+    func updateConfig(_ newConfig: AudioAnalysisConfiguration) async {
+        self.config = newConfig
+        print("⚙️ [AudioAnalyzer] 配置已更新为: \(newConfig.presetName)")
+    }
+
+    // MARK: - Diagnostic Methods
+
+    /// 启用诊断模式
+    /// - Parameter videoInfo: 视频基本信息
+    func enableDiagnosticMode(videoInfo: VideoDiagnosticInfo) async {
+        self.diagnosticMode = true
+        self.diagnosticCollector = DiagnosticDataCollector(videoInfo: videoInfo, config: config)
+        print("🔍 [AudioAnalyzer] 诊断模式已启用")
+    }
+
+    /// 禁用诊断模式
+    func disableDiagnosticMode() async {
+        self.diagnosticMode = false
+        self.diagnosticCollector = nil
+        print("🔍 [AudioAnalyzer] 诊断模式已禁用")
+    }
+
+    /// 获取诊断数据（仅在诊断模式下）
+    /// - Returns: 音频诊断数据，如果未启用诊断模式则返回 nil
+    func getDiagnosticData() async -> AudioDiagnosticData? {
+        guard let collector = diagnosticCollector else { return nil }
+        return collector.generateDiagnosticData()
+    }
+
     // MARK: - Private Methods - Analysis
 
     /// 分析单个音频样本缓冲区（增强版：结合FFT频谱分析）
@@ -188,14 +229,58 @@ actor AudioAnalyzer: AudioAnalyzing {
         // 2. 计算峰值功率（改进：使用滑动窗口检测瞬时峰值）
         let peakAmplitude = calculatePeakAmplitudeImproved(samples: floatSamples)
 
+        // 📊 诊断：记录 RMS 数据点
+        if diagnosticMode {
+            diagnosticCollector?.recordRMS(time: timestamp, rms: rms, peakAmplitude: peakAmplitude)
+        }
+
         // 3. 判断是否是显著峰值（收紧条件，减少误报）
         // 如果峰值幅度足够高，才认为是显著峰值
         let isPeak = peakAmplitude > config.peakThreshold
-        
+
         // 收紧条件：只有峰值幅度较高且RMS也较高时，才认为是潜在峰值
         let isPotentialPeak = peakAmplitude > config.peakThreshold * 0.85 && rms > 0.2
-        
-        guard isPeak || isPotentialPeak else { return nil }
+
+        guard isPeak || isPotentialPeak else {
+            // 📊 诊断：记录被振幅阈值拒绝的候选峰值
+            if diagnosticMode, (peakAmplitude > config.peakThreshold * 0.5 || rms > 0.1) {
+                // 仍然进行完整分析以收集诊断数据
+                let spectralAnalysis = analyzeSpectrum(samples: floatSamples, sampleRate: sampleRate)
+                let attackTime = calculateAttackTime(samples: floatSamples, sampleRate: sampleRate)
+                let eventDuration = calculateEventDuration(samples: floatSamples, sampleRate: sampleRate)
+                let energyConcentration = calculateEnergyConcentration(samples: samples)
+                let confidence = 0.0  // 未通过初步检查
+
+                let breakdown = extractConfidenceBreakdown(
+                    peakAmplitude: peakAmplitude,
+                    rms: rms,
+                    energyConcentration: energyConcentration,
+                    spectralAnalysis: spectralAnalysis
+                )
+                let spectralFeatures = convertSpectralFeatures(spectralAnalysis)
+
+                let reason = !isPeak ? "振幅低于阈值 (\(String(format: "%.3f", peakAmplitude)) < \(config.peakThreshold))" :
+                                      "RMS过低 (\(String(format: "%.3f", rms)) < 0.2)"
+                recordDiagnosticCandidate(
+                    time: timestamp,
+                    amplitude: peakAmplitude,
+                    rms: rms,
+                    duration: eventDuration,
+                    confidence: confidence,
+                    spectralFeatures: spectralFeatures,
+                    confidenceBreakdown: breakdown,
+                    passed: false,
+                    rejectionReason: reason,
+                    rejectionStage: FilteringStage.amplitudeFilter.rawValue
+                )
+            }
+            return nil
+        }
+
+        // 更新诊断统计
+        if diagnosticMode {
+            diagnosticCollector?.passedAmplitudeThreshold += 1
+        }
 
         // 4. FFT频谱分析（检测击球声的典型频率特征）
         let spectralAnalysis = analyzeSpectrum(samples: floatSamples, sampleRate: sampleRate)
@@ -213,7 +298,46 @@ actor AudioAnalyzer: AudioAnalyzing {
         // 如果持续时间明显不合理，直接过滤掉
         // 只在置信度很低时才硬过滤（从0.6降至0.45，减少误过滤）
         if !isValidDuration && peakAmplitude < 0.45 {
+            // 📊 诊断：记录被持续时间拒绝的候选峰值
+            if diagnosticMode {
+                let energyConcentration = calculateEnergyConcentration(samples: samples)
+                let confidence = calculateHitSoundConfidenceEnhanced(
+                    rms: rms,
+                    peakAmplitude: peakAmplitude,
+                    samples: samples,
+                    sampleRate: sampleRate,
+                    spectralAnalysis: spectralAnalysis,
+                    attackTime: attackTime,
+                    eventDuration: eventDuration
+                )
+
+                let breakdown = extractConfidenceBreakdown(
+                    peakAmplitude: peakAmplitude,
+                    rms: rms,
+                    energyConcentration: energyConcentration,
+                    spectralAnalysis: spectralAnalysis
+                )
+                let spectralFeatures = convertSpectralFeatures(spectralAnalysis)
+
+                recordDiagnosticCandidate(
+                    time: timestamp,
+                    amplitude: peakAmplitude,
+                    rms: rms,
+                    duration: eventDuration,
+                    confidence: confidence,
+                    spectralFeatures: spectralFeatures,
+                    confidenceBreakdown: breakdown,
+                    passed: false,
+                    rejectionReason: "持续时间不符合范围 (\(String(format: "%.3f", eventDuration))s, 需要 0.01-0.15s) 且振幅过低",
+                    rejectionStage: FilteringStage.durationFilter.rawValue
+                )
+            }
             return nil
+        }
+
+        // 更新诊断统计
+        if diagnosticMode {
+            diagnosticCollector?.passedDurationCheck += 1
         }
 
         // 6. 计算置信度（基于多个特征，包括频谱）
@@ -234,6 +358,39 @@ actor AudioAnalyzer: AudioAnalyzing {
         // 收紧条件：提高置信度阈值，减少误报
         // 对于明显的峰值（幅度很高），可以稍微放宽置信度要求
         let confidenceThreshold = peakAmplitude > 0.5 ? config.minimumConfidence * 0.9 : config.minimumConfidence
+
+        // 📊 诊断：记录候选峰值（通过或拒绝）
+        if diagnosticMode {
+            let energyConcentration = calculateEnergyConcentration(samples: samples)
+            let breakdown = extractConfidenceBreakdown(
+                peakAmplitude: peakAmplitude,
+                rms: rms,
+                energyConcentration: energyConcentration,
+                spectralAnalysis: spectralAnalysis
+            )
+            let spectralFeatures = convertSpectralFeatures(spectralAnalysis)
+
+            let passed = confidence >= confidenceThreshold
+            let rejectionReason = passed ? nil : "置信度过低 (\(String(format: "%.3f", confidence)) < \(String(format: "%.3f", confidenceThreshold)))"
+            let rejectionStage = passed ? nil : FilteringStage.confidenceFilter.rawValue
+
+            recordDiagnosticCandidate(
+                time: preciseTimestamp,
+                amplitude: peakAmplitude,
+                rms: rms,
+                duration: eventDuration,
+                confidence: confidence,
+                spectralFeatures: spectralFeatures,
+                confidenceBreakdown: breakdown,
+                passed: passed,
+                rejectionReason: rejectionReason,
+                rejectionStage: rejectionStage
+            )
+
+            if passed {
+                diagnosticCollector?.passedConfidenceThreshold += 1
+            }
+        }
 
         if confidence >= confidenceThreshold {
             return AudioPeak(
@@ -883,6 +1040,10 @@ actor AudioAnalyzer: AudioAnalyzing {
         // ⚡️ 快速通道：如果整体音频质量很好（高置信度），跳过自适应过滤
         // 这可以避免误过滤真实击球，减少累积损失
         if meanConfidence > 0.7 {
+            // 更新诊断统计计数器
+            if diagnosticMode {
+                diagnosticCollector?.passedAdaptiveFiltering = peaks.count
+            }
             return peaks
         }
 
@@ -935,6 +1096,11 @@ actor AudioAnalyzer: AudioAnalyzing {
             }
         }
 
+        // 更新诊断统计计数器
+        if diagnosticMode {
+            diagnosticCollector?.passedAdaptiveFiltering = filtered.count
+        }
+
         return filtered
     }
 
@@ -979,7 +1145,92 @@ actor AudioAnalyzer: AudioAnalyzing {
             filtered.append(lastPeak)
         }
 
+        // 更新诊断统计计数器
+        if diagnosticMode {
+            diagnosticCollector?.afterPostProcessing = filtered.count
+        }
+
         return filtered
+    }
+
+    // MARK: - Diagnostic Helper Methods
+
+    /// 记录诊断候选峰值（仅在诊断模式下）
+    private func recordDiagnosticCandidate(
+        time: Double,
+        amplitude: Double,
+        rms: Double,
+        duration: Double,
+        confidence: Double,
+        spectralFeatures: SpectralFeatures,
+        confidenceBreakdown: ConfidenceBreakdown,
+        passed: Bool,
+        rejectionReason: String?,
+        rejectionStage: String?
+    ) {
+        guard diagnosticMode, let collector = diagnosticCollector else { return }
+
+        let candidate = CandidatePeakData(
+            time: time,
+            amplitude: amplitude,
+            rms: rms,
+            duration: duration,
+            confidence: confidence,
+            confidenceBreakdown: confidenceBreakdown,
+            spectralFeatures: spectralFeatures,
+            passedFiltering: passed,
+            rejectionReason: rejectionReason,
+            rejectionStage: rejectionStage
+        )
+
+        collector.recordCandidate(candidate)
+    }
+
+    /// 提取置信度分解信息
+    private func extractConfidenceBreakdown(
+        peakAmplitude: Double,
+        rms: Double,
+        energyConcentration: Double,
+        spectralAnalysis: SpectralAnalysis
+    ) -> ConfidenceBreakdown {
+        // 复制 calculateHitSoundConfidenceEnhanced 的逻辑
+        let amplitudeScore = min(peakAmplitude / 0.6, 1.0) * 0.33
+        let crestFactor = peakAmplitude / (rms + 0.001)
+        let crestScore = min(crestFactor / 4.0, 1.0) * 0.23
+        let energyScore = energyConcentration * 0.14
+
+        let frequencyInPrimaryRange = spectralAnalysis.dominantFrequency >= 1000 &&
+                                     spectralAnalysis.dominantFrequency <= 3000
+        let frequencyScore = (frequencyInPrimaryRange ? 1.0 :
+                           (spectralAnalysis.dominantFrequency >= 300 &&
+                            spectralAnalysis.dominantFrequency <= 5000 ? 0.6 : 0.3)) * 0.14
+
+        let highFreqScore = min(spectralAnalysis.highFreqEnergyRatio / 0.15, 1.0) * 0.14
+
+        // 其他特征总和 (剩余 2%)
+        let otherScore = 0.02
+
+        return ConfidenceBreakdown(
+            amplitudeScore: amplitudeScore,
+            crestFactorScore: crestScore,
+            energyConcentrationScore: energyScore,
+            frequencyRangeScore: frequencyScore,
+            highFreqEnergyScore: highFreqScore,
+            otherFeaturesScore: otherScore
+        )
+    }
+
+    /// 从 SpectralAnalysis 转换为 SpectralFeatures
+    private func convertSpectralFeatures(_ analysis: SpectralAnalysis) -> SpectralFeatures {
+        return SpectralFeatures(
+            dominantFrequency: analysis.dominantFrequency,
+            spectralCentroid: analysis.spectralCentroid,
+            spectralRolloff: analysis.spectralRolloff,
+            lowFreqEnergy: analysis.energyInLowFreq,
+            primaryHitRangeEnergy: analysis.energyInPrimaryRange,
+            highFreqEnergy: analysis.highFreqEnergyRatio,
+            mfccMean: analysis.mfccCoefficients.isEmpty ? nil : Array(analysis.mfccCoefficients.prefix(5))
+        )
     }
 }
 
@@ -995,6 +1246,17 @@ struct AudioAnalysisConfiguration {
 
     /// 最小峰值间隔（秒）- 太近的峰值会被合并
     let minimumPeakInterval: Double
+
+    /// 配置预设名称
+    var presetName: String {
+        switch (peakThreshold, minimumConfidence) {
+        case (0.25, 0.50): return "default"
+        case (0.4, 0.6): return "strict"
+        case (0.1, 0.25): return "lenient"
+        case (0.18, 0.45): return "mobile_recording"
+        default: return "custom"
+        }
+    }
 
     /// 默认配置（平衡准确率和召回率）
     static let `default` = AudioAnalysisConfiguration(
@@ -1016,6 +1278,159 @@ struct AudioAnalysisConfiguration {
         minimumConfidence: 0.25,  // 非常低的置信度
         minimumPeakInterval: 0.08  // 允许非常密集的峰值
     )
+
+    /// 手机录制配置（针对移动设备录制的视频优化）
+    /// 适用于：整体音量偏低、峰值振幅较小的手机现场录制视频
+    static let mobileRecording = AudioAnalysisConfiguration(
+        peakThreshold: 0.18,  // 降低阈值以适应手机录制的较低音量
+        minimumConfidence: 0.45,  // 适度降低置信度要求
+        minimumPeakInterval: 0.18  // 保持与 default 相同的间隔
+    )
+}
+
+// MARK: - Diagnostic Data Collector
+
+/// 诊断数据收集器 - 收集音频分析过程中的所有中间数据
+private class DiagnosticDataCollector {
+    let videoInfo: VideoDiagnosticInfo
+    let config: AudioAnalysisConfiguration
+
+    var allCandidates: [CandidatePeakData] = []
+    var finalPeaks: [CandidatePeakData] = []
+    var rmsTimeSeries: [RMSDataPoint] = []
+    var spectralSamples: [SpectralDataPoint] = []
+
+    // 统计计数器
+    var passedAmplitudeThreshold = 0
+    var passedDurationCheck = 0
+    var passedConfidenceThreshold = 0
+    var passedAdaptiveFiltering = 0
+    var afterPostProcessing = 0
+
+    var rejectionReasons: [String: Int] = [:]
+
+    // 全局音频特征
+    var allRMSValues: [Double] = []
+    var allPeakAmplitudes: [Double] = []
+
+    init(videoInfo: VideoDiagnosticInfo, config: AudioAnalysisConfiguration) {
+        self.videoInfo = videoInfo
+        self.config = config
+    }
+
+    /// 记录候选峰值
+    func recordCandidate(_ candidate: CandidatePeakData) {
+        allCandidates.append(candidate)
+
+        // 更新统计
+        if candidate.passedFiltering {
+            finalPeaks.append(candidate)
+        }
+
+        if let reason = candidate.rejectionReason {
+            rejectionReasons[reason, default: 0] += 1
+        }
+
+        // 收集幅度数据
+        allPeakAmplitudes.append(candidate.amplitude)
+    }
+
+    /// 记录 RMS 数据点
+    func recordRMS(time: Double, rms: Double, peakAmplitude: Double?) {
+        allRMSValues.append(rms)
+        rmsTimeSeries.append(RMSDataPoint(time: time, rms: rms, peakAmplitude: peakAmplitude))
+    }
+
+    /// 记录频谱数据
+    func recordSpectralData(time: Double, frequencyBins: [Double], magnitudes: [Double]) {
+        spectralSamples.append(SpectralDataPoint(
+            time: time,
+            frequencyBins: frequencyBins,
+            magnitudes: magnitudes
+        ))
+    }
+
+    /// 生成完整的诊断数据
+    func generateDiagnosticData() -> AudioDiagnosticData {
+        // 计算全局音频特征
+        let audioFeatures = calculateGlobalFeatures()
+
+        // 计算过滤统计
+        let stats = FilteringStatistics(
+            totalCandidates: allCandidates.count,
+            passedAmplitudeThreshold: passedAmplitudeThreshold,
+            passedDurationCheck: passedDurationCheck,
+            passedConfidenceThreshold: passedConfidenceThreshold,
+            passedAdaptiveFiltering: passedAdaptiveFiltering,
+            afterPostProcessing: afterPostProcessing,
+            finalCount: finalPeaks.count,
+            rejectionReasons: rejectionReasons,
+            averageConfidence: finalPeaks.isEmpty ? 0 : finalPeaks.map { $0.confidence }.reduce(0, +) / Double(finalPeaks.count),
+            medianConfidence: calculateMedian(finalPeaks.map { $0.confidence })
+        )
+
+        // 配置快照
+        let configSnapshot = AudioConfigSnapshot(
+            peakThreshold: config.peakThreshold,
+            minimumConfidence: config.minimumConfidence,
+            minimumPeakInterval: config.minimumPeakInterval,
+            presetName: config.presetName
+        )
+
+        return AudioDiagnosticData(
+            videoInfo: videoInfo,
+            audioFeatures: audioFeatures,
+            allCandidatePeaks: allCandidates,
+            finalPeaks: finalPeaks,
+            filteringStats: stats,
+            rmsTimeSeries: rmsTimeSeries,
+            spectralSamples: spectralSamples.isEmpty ? nil : spectralSamples,
+            configuration: configSnapshot,
+            timestamp: Date()
+        )
+    }
+
+    private func calculateGlobalFeatures() -> AudioGlobalFeatures {
+        let rmsValues = allRMSValues
+        let peakAmps = allPeakAmplitudes
+
+        return AudioGlobalFeatures(
+            overallRMSMean: rmsValues.isEmpty ? 0 : rmsValues.reduce(0, +) / Double(rmsValues.count),
+            overallRMSStdDev: calculateStdDev(rmsValues),
+            overallRMSMax: rmsValues.max() ?? 0,
+            overallRMSMedian: calculateMedian(rmsValues),
+            overallRMSP90: calculatePercentile(rmsValues, percentile: 90),
+            maxPeakAmplitude: peakAmps.max() ?? 0,
+            medianPeakAmplitude: calculateMedian(peakAmps),
+            dominantFrequencyRange: "未分析",  // TODO: 实际计算
+            estimatedSNR: nil  // TODO: 实际计算
+        )
+    }
+
+    private func calculateMedian(_ values: [Double]) -> Double {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        let mid = sorted.count / 2
+        if sorted.count % 2 == 0 {
+            return (sorted[mid-1] + sorted[mid]) / 2
+        } else {
+            return sorted[mid]
+        }
+    }
+
+    private func calculateStdDev(_ values: [Double]) -> Double {
+        guard values.count > 1 else { return 0 }
+        let mean = values.reduce(0, +) / Double(values.count)
+        let variance = values.map { pow($0 - mean, 2) }.reduce(0, +) / Double(values.count - 1)
+        return sqrt(variance)
+    }
+
+    private func calculatePercentile(_ values: [Double], percentile: Double) -> Double {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        let index = Int(Double(sorted.count) * percentile / 100.0)
+        return sorted[min(index, sorted.count - 1)]
+    }
 }
 
 /// 音频分析错误

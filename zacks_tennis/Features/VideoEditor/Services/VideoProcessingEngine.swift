@@ -137,6 +137,62 @@ final class VideoProcessingEngine: VideoProcessing {
             throw ProcessingError.noVideoTrack
         }
 
+        // 🎯 智能配置选择 + 🔍 启用音频诊断模式
+        let sampleRate = try? await asset.load(.tracks).first(where: { $0.mediaType == .audio })?.load(.naturalTimeScale)
+        let audioTrack = try? await asset.load(.tracks).first(where: { $0.mediaType == .audio })
+        let channelCount = (try? await audioTrack?.load(.formatDescriptions).first.map { formatDesc -> Int in
+            let formatDescRef = formatDesc as! CMAudioFormatDescription
+            let basicDesc = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescRef)
+            return Int(basicDesc?.pointee.mChannelsPerFrame ?? 1)
+        }) ?? 1
+
+        // 🎯 步骤1：快速音频预扫描（分析前 30 秒音频特征）
+        let quickScanDuration = min(30.0, duration)
+        let quickScanTimeRange = CMTimeRange(
+            start: .zero,
+            duration: CMTime(seconds: quickScanDuration, preferredTimescale: 600)
+        )
+
+        let quickScanResult = try? await audioAnalyzer.analyzeAudio(
+            from: asset,
+            timeRange: quickScanTimeRange
+        )
+
+        // 🎯 步骤2：根据音频特征智能选择配置
+        let selectedConfig = selectOptimalConfig(
+            quickScanResult: quickScanResult,
+            videoTitle: video.title
+        )
+
+        // 🎯 步骤3：应用选择的配置
+        await audioAnalyzer.updateConfig(selectedConfig)
+
+        // 🔍 步骤4：启用诊断模式
+        let videoInfo = VideoDiagnosticInfo(
+            fileName: video.title,
+            duration: duration,
+            sampleRate: Double(sampleRate ?? 44100),
+            channelCount: channelCount
+        )
+        await audioAnalyzer.enableDiagnosticMode(videoInfo: videoInfo)
+        print("🔍 [VideoProcessing] 已启用音频诊断模式")
+
+        // Defer: 在处理结束时导出诊断数据
+        defer {
+            Task { @MainActor in
+                if let diagnosticData = await audioAnalyzer.getDiagnosticData() {
+                    if let fileURL = AudioDiagnosticExporter.exportToFile(
+                        diagnosticData: diagnosticData,
+                        videoTitle: video.title
+                    ) {
+                        video.audioDiagnosticDataPath = fileURL.path
+                        print("✅ [VideoProcessing] 音频诊断数据已导出: \(fileURL.path)")
+                    }
+                }
+                await audioAnalyzer.disableDiagnosticMode()
+            }
+        }
+
         // 初始化处理状态（如果是新处理）
         if resumeFromState == nil {
             _ = stateManager.createState(
@@ -890,6 +946,87 @@ final class VideoProcessingEngine: VideoProcessing {
         let minutes = Int(seconds) / 60
         let secs = Int(seconds) % 60
         return String(format: "%d:%02d", minutes, secs)
+    }
+
+    // MARK: - Smart Configuration Selection
+
+    /// 根据音频快速扫描结果智能选择最优配置
+    /// - Parameters:
+    ///   - quickScanResult: 快速扫描结果（前30秒音频分析）
+    ///   - videoTitle: 视频标题（用于启发式判断）
+    /// - Returns: 选择的音频分析配置
+    private func selectOptimalConfig(
+        quickScanResult: AudioAnalysisResult?,
+        videoTitle: String
+    ) -> AudioAnalysisConfiguration {
+        // 默认配置
+        var selectedConfig = AudioAnalysisConfiguration.default
+
+        // 如果快速扫描失败或无结果，使用启发式规则
+        guard let scanResult = quickScanResult, !scanResult.hitSounds.isEmpty else {
+            print("⚙️ [ConfigSelection] 快速扫描无结果，使用启发式规则")
+
+            // 启发式规则：检查视频标题中是否包含"手机"、"现场"等关键词
+            let lowerTitle = videoTitle.lowercased()
+            if lowerTitle.contains("手机") || lowerTitle.contains("现场") ||
+               lowerTitle.contains("mobile") || lowerTitle.contains("phone") {
+                selectedConfig = .mobileRecording
+                print("⚙️ [ConfigSelection] 根据标题关键词选择: mobile_recording")
+            } else {
+                print("⚙️ [ConfigSelection] 使用默认配置: default")
+            }
+            return selectedConfig
+        }
+
+        // 计算扫描结果的音频特征
+        let hitAmplitudes = scanResult.hitSounds.map { $0.amplitude }
+        let hitConfidences = scanResult.hitSounds.map { $0.confidence }
+
+        guard !hitAmplitudes.isEmpty else {
+            print("⚙️ [ConfigSelection] 扫描结果无峰值，使用 mobile_recording 配置")
+            return .mobileRecording
+        }
+
+        // 计算统计指标
+        let avgAmplitude = hitAmplitudes.reduce(0.0, +) / Double(hitAmplitudes.count)
+        let maxAmplitude = hitAmplitudes.max() ?? 0.0
+        let medianAmplitude = hitAmplitudes.sorted()[hitAmplitudes.count / 2]
+
+        let avgConfidence = hitConfidences.reduce(0.0, +) / Double(hitConfidences.count)
+
+        print("📊 [ConfigSelection] 快速扫描统计:")
+        print("   - 检测到 \(scanResult.hitSounds.count) 个击球声")
+        print("   - 平均振幅: \(String(format: "%.3f", avgAmplitude))")
+        print("   - 中位振幅: \(String(format: "%.3f", medianAmplitude))")
+        print("   - 最大振幅: \(String(format: "%.3f", maxAmplitude))")
+        print("   - 平均置信度: \(String(format: "%.3f", avgConfidence))")
+
+        // 决策逻辑：基于音频特征选择配置
+        if medianAmplitude < 0.22 || avgAmplitude < 0.20 {
+            // 音量偏低 → 使用 mobile_recording 配置
+            selectedConfig = .mobileRecording
+            print("⚙️ [ConfigSelection] 检测到低音量 → 选择: mobile_recording")
+            print("   原因: 中位振幅 \(String(format: "%.3f", medianAmplitude)) < 0.22 或平均振幅 \(String(format: "%.3f", avgAmplitude)) < 0.20")
+
+        } else if avgConfidence < 0.60 && scanResult.hitSounds.count < 5 {
+            // 置信度低且检测数量少 → 使用 lenient 配置
+            selectedConfig = .lenient
+            print("⚙️ [ConfigSelection] 检测到低置信度且数量少 → 选择: lenient")
+            print("   原因: 平均置信度 \(String(format: "%.3f", avgConfidence)) < 0.60 且检测数量 \(scanResult.hitSounds.count) < 5")
+
+        } else if maxAmplitude > 0.6 && avgConfidence > 0.75 {
+            // 音质很好 → 使用 strict 配置
+            selectedConfig = .strict
+            print("⚙️ [ConfigSelection] 检测到高质量音频 → 选择: strict")
+            print("   原因: 最大振幅 \(String(format: "%.3f", maxAmplitude)) > 0.6 且平均置信度 \(String(format: "%.3f", avgConfidence)) > 0.75")
+
+        } else {
+            // 其他情况 → 使用默认配置
+            selectedConfig = .default
+            print("⚙️ [ConfigSelection] 音频特征适中 → 选择: default")
+        }
+
+        return selectedConfig
     }
 }
 

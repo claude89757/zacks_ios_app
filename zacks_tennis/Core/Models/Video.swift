@@ -93,6 +93,12 @@ final class Video {
     /// 导出文件路径列表（JSON 字符串）
     var exportedFilesJSON: String?
 
+    /// 调试数据（JSON 字符串）- 存储详细的分析调试信息
+    var debugDataJSON: String?
+
+    /// 音频诊断数据文件路径 - 自动记录每次分析的音频诊断 JSON
+    var audioDiagnosticDataPath: String?
+
     /// 备注
     var notes: String
 

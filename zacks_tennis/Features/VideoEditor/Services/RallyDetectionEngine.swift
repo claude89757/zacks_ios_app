@@ -16,6 +16,9 @@ actor RallyDetectionEngine {
     /// 检测配置
     private let config: RallyDetectionConfiguration
 
+    /// 最近一次分析的调试数据（用于导出）
+    private(set) var lastAnalysisDebugData: RuntimeDebugData?
+
     // MARK: - Legacy Visual State (temporarily disabled)
     // private var currentState: DetectionState = .idle
     // private var currentRally: RallyBuilder?
@@ -251,10 +254,57 @@ actor RallyDetectionEngine {
 
         // 合并相邻的短回合
         let mergedRallies = mergeAdjacentRallies(rallies)
-        
+
         if debugLogging && mergedRallies.count != rallies.count {
             print("🔗 [RallyDetection] 合并后: \(mergedRallies.count) 个回合（合并了 \(rallies.count - mergedRallies.count) 个相邻回合）")
         }
+
+        // 保存调试数据（用于导出）
+        // 转换间隔统计数据
+        let statsData = IntervalStats(
+            mean: intervalStats.mean,
+            stdDev: intervalStats.stdDev,
+            median: intervalStats.median,
+            percentile75: intervalStats.percentile75,
+            percentile90: intervalStats.percentile90,
+            percentile95: intervalStats.percentile95,
+            rallyBoundaryThreshold: intervalStats.rallyBoundaryThreshold,
+            maxHitInterval: intervalStats.maxHitInterval,
+            totalIntervals: peaks.count - 1
+        )
+
+        // 重新计算贝叶斯变化点（用于调试数据）
+        let bayesianIntervalStats = BayesianChangePointDetector.IntervalStatistics(
+            mean: intervalStats.mean,
+            stdDev: intervalStats.stdDev,
+            median: intervalStats.median,
+            percentile75: intervalStats.percentile75,
+            percentile90: intervalStats.percentile90,
+            percentile95: intervalStats.percentile95,
+            rallyBoundaryThreshold: intervalStats.rallyBoundaryThreshold,
+            maxHitInterval: intervalStats.maxHitInterval
+        )
+        let bayesianConfig = BayesianChangePointDetector.Config.adaptive(intervalStats: bayesianIntervalStats)
+        let detector = BayesianChangePointDetector(config: bayesianConfig)
+        let changePoints = detector.detectChangePoints(peaks: peaks)
+
+        // 转换贝叶斯变化点数据
+        let bayesianData = changePoints.map { cp in
+            BayesianChangePoint(
+                time: cp.time,
+                probability: cp.probability,
+                runLength: cp.runLength,
+                isChangePoint: cp.isChangePoint
+            )
+        }
+
+        // 保存到实例变量
+        lastAnalysisDebugData = RuntimeDebugData(
+            intervalStatistics: statsData,
+            bayesianChangePoints: bayesianData,
+            peakDetails: nil,  // 峰值详细数据需要从 AudioAnalyzer 获取
+            timestamp: Date()
+        )
 
         return mergedRallies
     }
@@ -1019,7 +1069,8 @@ struct RallyDetectionConfiguration {
     )
 }
 
-/// 检测引擎错误
+// MARK: - RallyDetectionError
+
 enum RallyDetectionError: LocalizedError {
     case invalidConfiguration
     case noFramesProvided

@@ -14,6 +14,8 @@ struct VideoAnalysisDetailView: View {
     @State private var selectedRally: VideoHighlight?
     @State private var showingRallyPlayer = false
     @State private var showingExportOptions = false
+    @State private var showingTimeline = false
+    @State private var showingDebugTools = false
     @State private var filterOption: FilterOption = .all
 
     var body: some View {
@@ -45,6 +47,31 @@ struct VideoAnalysisDetailView: View {
         .navigationTitle("分析结果")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            // 调试工具菜单
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    // 查看时间线
+                    Button {
+                        showingTimeline = true
+                    } label: {
+                        Label("查看时间线", systemImage: "chart.bar.xaxis")
+                    }
+                    .disabled(!video.isAnalyzed || video.highlights.isEmpty)
+
+                    // 导出调试数据
+                    Button {
+                        showingDebugTools = true
+                    } label: {
+                        Label("导出调试数据", systemImage: "doc.text.magnifyingglass")
+                    }
+                    .disabled(!video.isAnalyzed)
+                } label: {
+                    Image(systemName: "wrench.and.screwdriver")
+                        .imageScale(.large)
+                }
+            }
+
+            // 原有的导出按钮
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     showingExportOptions = true
@@ -53,6 +80,12 @@ struct VideoAnalysisDetailView: View {
                 }
                 .disabled(video.highlights.isEmpty)
             }
+        }
+        .sheet(isPresented: $showingTimeline) {
+            TimelineSheetView(video: video)
+        }
+        .sheet(isPresented: $showingDebugTools) {
+            DebugToolsSheetView(video: video)
         }
         .sheet(isPresented: $showingExportOptions) {
             ExportOptionsView(video: video, rallies: filteredRallies, viewModel: viewModel)
@@ -508,6 +541,417 @@ struct RallyListCard: View {
         } catch {
             print("⚠️ 加载缩略图失败: \(error.localizedDescription)")
         }
+    }
+}
+
+// MARK: - Timeline Sheet View
+
+struct TimelineSheetView: View {
+    let video: Video
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 16) {
+                    // 说明文字
+                    HStack {
+                        Image(systemName: "info.circle")
+                            .foregroundColor(.blue)
+                        Text("时间线展示了视频中所有回合和击球点的分布情况")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+                    .padding(.horizontal)
+                    .padding(.top)
+
+                    // 时间线可视化
+                    VideoTimelineView(
+                        totalDuration: video.duration,
+                        rallies: video.timelineRallies,
+                        hitEvents: video.allHitEvents,
+                        onTapTime: { time in
+                            print("🎯 跳转到视频时间: \(time)s")
+                            // TODO: 实现视频跳转功能
+                        }
+                    )
+                    .padding(.bottom)
+                }
+            }
+            .navigationTitle("击球点时间线")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("完成") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Debug Tools Sheet View
+
+struct DebugToolsSheetView: View {
+    let video: Video
+    @Environment(\.dismiss) private var dismiss
+    @State private var showToast = false
+    @State private var toastMessage = ""
+    @State private var showShareSheet = false
+    @State private var shareFileURL: URL?
+    @State private var selectedTab = 0  // 0: 数据导出, 1: 音频诊断
+    @State private var audioDiagnosticData: AudioDiagnosticData? = nil
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                // 分段控制
+                Picker("选择功能", selection: $selectedTab) {
+                    Text("数据导出").tag(0)
+                    Text("音频诊断").tag(1)
+                }
+                .pickerStyle(.segmented)
+                .padding()
+
+                // 内容区域
+                if selectedTab == 0 {
+                    dataExportView
+                } else {
+                    audioDiagnosticView
+                }
+            }  // VStack
+            .onAppear {
+                loadAudioDiagnosticData()
+            }
+            .navigationTitle("调试工具")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("完成") {
+                        dismiss()
+                    }
+                }
+            }
+            .overlay(
+                // Toast 提示
+                Group {
+                    if showToast {
+                        VStack {
+                            Spacer()
+                            HStack {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
+                                Text(toastMessage)
+                                    .font(.subheadline)
+                            }
+                            .padding()
+                            .background(Color(.systemBackground))
+                            .cornerRadius(10)
+                            .shadow(radius: 10)
+                            .padding(.bottom, 50)
+                        }
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+                }
+            )
+            .sheet(isPresented: $showShareSheet) {
+                if let url = shareFileURL {
+                    ShareSheet(activityItems: [url])
+                }
+            }
+        }  // NavigationStack
+    }  // body View
+
+    // MARK: - Data Export View
+
+    private var dataExportView: some View {
+        ScrollView {
+                VStack(spacing: 20) {
+                    // 说明文字
+                    HStack {
+                        Image(systemName: "info.circle")
+                            .foregroundColor(.orange)
+                        Text("导出完整的分析数据用于算法调试和优化")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+                    .padding(.horizontal)
+                    .padding(.top)
+
+                    // 操作按钮
+                    VStack(spacing: 12) {
+                        // 复制到剪贴板
+                        Button {
+                            copyToClipboard()
+                        } label: {
+                            HStack {
+                                Image(systemName: "doc.on.clipboard")
+                                    .font(.title3)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("复制到剪贴板")
+                                        .font(.headline)
+                                    Text("快速复制 JSON 数据")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding()
+                            .background(Color(.systemGray6))
+                            .cornerRadius(12)
+                        }
+                        .buttonStyle(.plain)
+
+                        // 导出文件
+                        Button {
+                            exportToFile()
+                        } label: {
+                            HStack {
+                                Image(systemName: "square.and.arrow.up")
+                                    .font(.title3)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("导出 JSON 文件")
+                                        .font(.headline)
+                                    Text("保存为文件并分享")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding()
+                            .background(Color(.systemGray6))
+                            .cornerRadius(12)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal)
+
+                    // 数据统计
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("数据统计")
+                            .font(.headline)
+                            .padding(.horizontal)
+
+                        VStack(spacing: 8) {
+                            statRow(icon: "film", label: "视频时长", value: formatDuration(video.duration))
+                            statRow(icon: "number", label: "回合数量", value: "\(video.rallyCount)")
+                            statRow(icon: "waveform", label: "击球事件", value: "\(video.allHitEvents.count)")
+                            statRow(icon: "doc.text", label: "估计大小", value: estimatedDataSize)
+                        }
+                        .padding()
+                        .background(Color(.systemGray6))
+                        .cornerRadius(12)
+                        .padding(.horizontal)
+                    }
+
+                    Spacer()
+                }  // VStack
+            }  // ScrollView
+    }  // dataExportView
+
+    // MARK: - Audio Diagnostic View
+
+    private var audioDiagnosticView: some View {
+        Group {
+            if let diagnosticData = audioDiagnosticData {
+                // 显示音频诊断可视化
+                AudioDiagnosticMainView(diagnosticData: diagnosticData)
+            } else {
+                // 显示启用诊断模式的说明
+                noDiagnosticDataView
+            }
+        }
+    }
+
+    private var noDiagnosticDataView: some View {
+        ScrollView {
+            VStack(spacing: 24) {
+                Spacer()
+                    .frame(height: 40)
+
+                // 图标
+                Image(systemName: "waveform.badge.magnifyingglass")
+                    .font(.system(size: 60))
+                    .foregroundColor(.orange)
+
+                // 说明文字
+                VStack(spacing: 12) {
+                    Text("音频诊断未启用")
+                        .font(.title2.bold())
+
+                    Text("启用音频诊断模式可以帮助您深入了解音频峰值检测的每个阶段，找出为什么击球声没有被检测到。")
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                }
+
+                // 功能说明
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("诊断功能包括:")
+                        .font(.headline)
+
+                    featureItem(icon: "chart.line.uptrend.xyaxis", text: "RMS 时间序列图 - 显示音频电平变化")
+                    featureItem(icon: "chart.xyaxis.line", text: "候选峰值分布 - 振幅 vs 置信度")
+                    featureItem(icon: "chart.bar", text: "过滤阶段漏斗 - 各阶段通过率")
+                    featureItem(icon: "exclamationmark.triangle", text: "拒绝原因统计 - 了解峰值为何被过滤")
+                }
+                .padding()
+                .background(Color(.systemGray6))
+                .cornerRadius(12)
+                .padding(.horizontal)
+
+                // 提示
+                HStack(spacing: 8) {
+                    Image(systemName: "lightbulb")
+                        .foregroundColor(.yellow)
+                    Text("诊断模式需要重新分析视频，可能需要几分钟时间")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 32)
+
+                // 启用按钮（暂时禁用，需要集成到分析流程）
+                Button {
+                    // TODO: 启用诊断模式并重新分析
+                    showToastMessage("此功能正在开发中")
+                } label: {
+                    Label("启用诊断模式并重新分析", systemImage: "arrow.triangle.2.circlepath")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(Color.orange.opacity(0.5))  // 暂时灰色表示未实现
+                        .cornerRadius(12)
+                }
+                .disabled(true)  // 暂时禁用
+                .padding(.horizontal)
+
+                Spacer()
+            }
+        }
+    }
+
+    private func featureItem(icon: String, text: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.title3)
+                .foregroundColor(.blue)
+                .frame(width: 30)
+
+            Text(text)
+                .font(.subheadline)
+
+            Spacer()
+        }
+    }
+
+    // MARK: - Helper Views
+
+    private func statRow(icon: String, label: String, value: String) -> some View {
+        HStack {
+            Image(systemName: icon)
+                .foregroundColor(.secondary)
+                .frame(width: 24)
+
+            Text(label)
+                .foregroundColor(.secondary)
+
+            Spacer()
+
+            Text(value)
+                .fontWeight(.medium)
+        }
+    }
+
+    // MARK: - Methods
+
+    /// 从文件加载音频诊断数据
+    private func loadAudioDiagnosticData() {
+        guard let filePath = video.audioDiagnosticDataPath else {
+            print("⚠️ [DebugTools] 没有可用的音频诊断数据文件路径")
+            return
+        }
+
+        if let data = AudioDiagnosticExporter.loadFromFile(filePath: filePath) {
+            audioDiagnosticData = data
+            print("✅ [DebugTools] 已加载音频诊断数据")
+        } else {
+            audioDiagnosticData = nil
+            print("❌ [DebugTools] 加载音频诊断数据失败")
+        }
+    }
+
+    // MARK: - Computed Properties
+
+    private var estimatedDataSize: String {
+        let rallySize = video.rallyCount * 500
+        let hitSize = video.allHitEvents.count * 200
+        let totalBytes = rallySize + hitSize + 1000
+        return ByteCountFormatter.string(fromByteCount: Int64(totalBytes), countStyle: .file)
+    }
+
+    // MARK: - Actions
+
+    private func copyToClipboard() {
+        let result = AnalysisDebugExporter.copyToClipboard(video: video)
+
+        if result.success {
+            let sizeStr = ByteCountFormatter.string(fromByteCount: Int64(result.dataSize), countStyle: .file)
+            showToastMessage("已复制 \(sizeStr) 到剪贴板")
+        } else {
+            showToastMessage("复制失败，请重试")
+        }
+    }
+
+    private func exportToFile() {
+        if let fileURL = AnalysisDebugExporter.exportToFile(video: video) {
+            shareFileURL = fileURL
+            showShareSheet = true
+        } else {
+            showToastMessage("导出失败，请重试")
+        }
+    }
+
+    private func showToastMessage(_ message: String) {
+        toastMessage = message
+        withAnimation {
+            showToast = true
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            withAnimation {
+                showToast = false
+            }
+        }
+    }
+
+    private func formatDuration(_ seconds: Double) -> String {
+        let minutes = Int(seconds) / 60
+        let secs = Int(seconds) % 60
+        return String(format: "%d:%02d", minutes, secs)
+    }
+}  // DebugToolsSheetView
+
+// MARK: - ShareSheet Helper
+
+/// UIActivityViewController 的 SwiftUI 包装器
+struct ShareSheet: UIViewControllerRepresentable {
+    let activityItems: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {
+        // No update needed
     }
 }
 

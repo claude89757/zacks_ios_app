@@ -59,6 +59,21 @@ protocol AudioAnalyzing: Actor {
     ///   - timeRange: 时间范围
     /// - Returns: 音频分析结果
     func analyzeAudio(from asset: AVAsset, timeRange: CMTimeRange) async throws -> AudioAnalysisResult
+
+    /// 更新音频分析配置
+    /// - Parameter newConfig: 新配置
+    func updateConfig(_ newConfig: AudioAnalysisConfiguration) async
+
+    /// 启用音频诊断模式
+    /// - Parameter videoInfo: 视频诊断信息
+    func enableDiagnosticMode(videoInfo: VideoDiagnosticInfo) async
+
+    /// 禁用音频诊断模式
+    func disableDiagnosticMode() async
+
+    /// 获取诊断数据
+    /// - Returns: 音频诊断数据，如果未启用诊断模式则返回 nil
+    func getDiagnosticData() async -> AudioDiagnosticData?
 }
 
 // MARK: - Ball Visualization Protocol

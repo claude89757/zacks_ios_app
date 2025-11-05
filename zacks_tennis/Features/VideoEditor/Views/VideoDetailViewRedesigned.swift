@@ -25,6 +25,10 @@ struct VideoDetailViewRedesigned: View {
     @State private var selectedRallies: Set<VideoHighlight.ID> = []
     @State private var showBatchDeleteAlert = false
 
+    // 调试工具状态
+    @State private var showingTimeline = false
+    @State private var showingDebugTools = false
+
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
@@ -77,6 +81,24 @@ struct VideoDetailViewRedesigned: View {
                         } label: {
                             Label("选择", systemImage: "checkmark.circle")
                         }
+
+                        Divider()
+
+                        // 查看时间线
+                        Button {
+                            showingTimeline = true
+                        } label: {
+                            Label("查看时间线", systemImage: "chart.bar.xaxis")
+                        }
+                        .disabled(!video.isAnalyzed || video.highlights.isEmpty)
+
+                        // 导出调试数据
+                        Button {
+                            showingDebugTools = true
+                        } label: {
+                            Label("导出调试数据", systemImage: "doc.text.magnifyingglass")
+                        }
+                        .disabled(!video.isAnalyzed)
 
                         Divider()
 
@@ -162,6 +184,14 @@ struct VideoDetailViewRedesigned: View {
             }
         } message: {
             Text("确定要删除选中的 \(selectedRallies.count) 个回合吗？此操作不可撤销。")
+        }
+        // 时间线弹窗
+        .sheet(isPresented: $showingTimeline) {
+            TimelineSheetView(video: video)
+        }
+        // 调试工具弹窗
+        .sheet(isPresented: $showingDebugTools) {
+            DebugToolsSheetView(video: video)
         }
     }
 
