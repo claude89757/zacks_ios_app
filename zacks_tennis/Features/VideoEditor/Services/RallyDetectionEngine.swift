@@ -136,19 +136,22 @@ actor RallyDetectionEngine {
             return sortedIntervals[min(index, sortedIntervals.count - 1)]
         }
 
+        let p60 = percentile(0.60)  // 新增 P60，更好区分回合内/回合间间隔
         let p75 = percentile(0.75)
         let p90 = percentile(0.90)
         let p95 = percentile(0.95)
 
         // 动态确定回合边界阈值
-        // 使用 95 分位数或均值 + 3×标准差，取较小值，但不小于 8 秒
-        let statisticalBoundary = min(p95, mean + 3.0 * stdDev)
-        let rallyBoundaryThreshold = max(8.0, min(statisticalBoundary, 15.0))  // 8-15秒范围
+        // 优化：使用 P90 替代 P95，范围从 8-15s 降至 5-8s
+        // 理由：P95 (19.84s) 太高，导致 12-31s 的间隔被错误合并
+        let statisticalBoundary = min(p90, mean + 2.5 * stdDev)
+        let rallyBoundaryThreshold = max(5.0, min(statisticalBoundary, 8.0))  // 5-8秒范围（优化：从 8-15s 降低）
 
         // 动态确定最大击球间隔
-        // 使用 75 分位数或均值 + 1.5×标准差，取较小值，但不小于 4 秒
-        let statisticalMaxHit = min(p75, mean + 1.5 * stdDev)
-        let maxHitInterval = max(4.0, min(statisticalMaxHit, 7.0))  // 4-7秒范围
+        // 优化：使用 P60 替代 P75，范围从 4-7s 降至 2.5-4s
+        // 理由：P75 (3.82s) 太高，导致 4-5s 的间隔被视为同一回合
+        let statisticalMaxHit = min(p60, mean + 1.0 * stdDev)
+        let maxHitInterval = max(2.5, min(statisticalMaxHit, 4.0))  // 2.5-4秒范围（优化：从 4-7s 降低）
 
         return IntervalStatistics(
             mean: mean,
@@ -172,6 +175,17 @@ actor RallyDetectionEngine {
         let peaks = audioResult.hitSounds
             .filter { $0.confidence >= config.audioConfidenceThreshold }
             .sorted { $0.time < $1.time }
+
+        // 🔧 防御性验证：确保峰值已正确排序
+        // 如果峰值未排序，会导致负间隔和错误的聚类结果
+        #if DEBUG
+        if peaks.count > 1 {
+            for i in 1..<peaks.count {
+                assert(peaks[i].time >= peaks[i-1].time,
+                       "峰值必须按时间排序！发现 peaks[\(i-1)].time=\(peaks[i-1].time) > peaks[\(i)].time=\(peaks[i].time)")
+            }
+        }
+        #endif
 
         guard !peaks.isEmpty else {
             if debugLogging {
@@ -388,6 +402,12 @@ actor RallyDetectionEngine {
     ) -> Bool {
         let timeInterval = current.time - previous.time
 
+        // 🔧 硬性上限：间隔超过 10 秒，绝不可能是同一回合
+        // 这是安全保障，防止极端情况（如 31s 间隔）被错误合并
+        if timeInterval > 10.0 {
+            return false
+        }
+
         // 如果间隔很短（<0.3秒），可能是同一击球的不同峰值，应该合并
         if timeInterval < 0.3 {
             return true
@@ -410,23 +430,25 @@ actor RallyDetectionEngine {
         // 如果当前簇已经有足够的击球（>= 4个），说明回合在进行中
         // 允许稍长的间隔（适应发球准备、换边等）
         if clusterHitCount >= 4 {
-            // 回合进行中，允许更长的间隔，但不超过动态阈值的 1.3 倍
-            let rallyInProgressInterval = min(baseInterval * 1.3, intervalStats.percentile90)
+            // 🔧 优化：降低倍数从 1.3 → 1.15，更严格的回合内间隔判断
+            // 理由：1.3倍会允许 4.0s * 1.3 = 5.2s 的间隔，太宽松
+            let rallyInProgressInterval = min(baseInterval * 1.15, intervalStats.percentile90)
             if timeInterval <= rallyInProgressInterval {
                 return true
             }
         } else {
             // 簇刚开始形成，使用标准间隔阈值
-            // 允许稍微长一点的间隔以适应发球准备
-            let startInterval = min(baseInterval * 1.2, intervalStats.percentile75)
+            // 🔧 优化：降低倍数从 1.2 → 1.1，使用 P60 替代 P75
+            let startInterval = min(baseInterval * 1.1, intervalStats.maxHitInterval)
             if timeInterval <= startInterval {
                 return true
             }
         }
 
         // 如果两个峰值置信度都很高，且间隔在合理范围内，应该聚为一簇
+        // 🔧 优化：降低倍数从 1.2 → 1.1
         if previous.confidence > 0.7 && current.confidence > 0.7 {
-            return timeInterval <= baseInterval * 1.2
+            return timeInterval <= baseInterval * 1.1
         }
 
         // 默认使用统计的最大击球间隔
@@ -480,12 +502,12 @@ actor RallyDetectionEngine {
             )
             let statisticalShouldSplit = !shouldClusterStatistically
 
-            // 🔧 修复混合决策逻辑（Critical Bug修复）
-            // 策略：统计方法为主（基于固定阈值更可靠），贝叶斯辅助修正
-            // 1. 统计认为分割 + 贝叶斯不强烈反对（>0.3） → 分割
-            // 2. 贝叶斯高度确定（>0.7） → 分割
-            let shouldSplit = (statisticalShouldSplit && changePointProb > 0.3) ||
-                              (changePointProb > 0.7)
+            // 🔧 优化混合决策逻辑：统计方法优先，贝叶斯仅辅助
+            // 策略：统计方法更可靠（基于明确的时间间隔阈值）
+            // 1. 统计认为分割 → 分割（信任统计判断）
+            // 2. 贝叶斯高度确定（>0.7）→ 额外分割（发现统计可能遗漏的边界）
+            // 理由：之前的逻辑要求统计和贝叶斯都同意才分割，导致明显的大间隔（15s）被阻止分割
+            let shouldSplit = statisticalShouldSplit || (changePointProb > 0.7)
 
             if shouldSplit {
                 // 保存当前簇，开始新簇
@@ -597,11 +619,12 @@ actor RallyDetectionEngine {
                 if let lastPeak = currentCluster.last, let firstPeak = nextCluster.first {
                     let gapInterval = firstPeak.time - lastPeak.time
                     
-                    // 更严格的合并条件：间隔很短（< 8秒），且其中一个簇很短（< 4个击球）
-                    // 避免过度合并导致回合过长
-                    let shouldMerge = gapInterval < 8.0 && 
-                                     (currentCluster.count < 4 || nextCluster.count < 4) &&
-                                     gapInterval < 12.0  // 确保不会合并间隔过长的簇
+                    // 🔧 非常严格的合并条件：只合并间隔极短（< 2秒）的小簇
+                    // 理由：之前 <8s 的阈值太松，会将已正确分割的回合重新合并
+                    // 只应合并明显错误分割的情况（如同一回合中的短暂静默）
+                    let shouldMerge = gapInterval < 2.0 &&
+                                     (currentCluster.count < 3 || nextCluster.count < 3)
+                    // 移除了 gapInterval < 12.0 的冗余条件（已被 < 2.0 包含）
                     
                     if shouldMerge {
                         // 合并簇

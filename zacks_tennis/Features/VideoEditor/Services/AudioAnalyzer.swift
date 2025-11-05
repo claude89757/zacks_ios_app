@@ -145,7 +145,11 @@ actor AudioAnalyzer: AudioAnalyzing {
         // 6. 后处理：过滤和合并相近的峰值
         let filteredPeaks = postProcessPeaks(adaptiveFiltered)
 
-        return AudioAnalysisResult(hitSounds: filteredPeaks)
+        // 🔧 CRITICAL FIX: 确保峰值按时间排序
+        // RallyDetectionEngine 依赖时间顺序进行聚类，未排序会导致负间隔和错误的回合分割
+        let sortedPeaks = filteredPeaks.sorted { $0.time < $1.time }
+
+        return AudioAnalysisResult(hitSounds: sortedPeaks)
     }
 
     /// 批量分析多个时间段的音频
@@ -292,12 +296,15 @@ actor AudioAnalyzer: AudioAnalyzing {
         let eventDuration = calculateEventDuration(samples: floatSamples, sampleRate: sampleRate)
 
         // 5b. 时长过滤：击球声的典型持续时间
-        // 放宽范围：10ms - 150ms（适应削球、轻击等多种技术）
-        let isValidDuration = eventDuration >= 0.01 && eventDuration <= 0.15
+        // 优化：真实网球击球声通常是 0.3-5ms 的瞬态信号
+        // 范围：0.3ms - 150ms（涵盖真实击球的瞬态特征）
+        let isValidDuration = eventDuration >= 0.0003 && eventDuration <= 0.15
 
         // 如果持续时间明显不合理，直接过滤掉
-        // 只在置信度很低时才硬过滤（从0.6降至0.45，减少误过滤）
-        if !isValidDuration && peakAmplitude < 0.45 {
+        // 优化：只对非常弱的信号(<0.25)严格执行时长检查
+        // 理由：高振幅峰值(>0.25)即使时长短也可能是真实击球
+        let requiresStrictDuration = peakAmplitude < 0.25
+        if !isValidDuration && requiresStrictDuration {
             // 📊 诊断：记录被持续时间拒绝的候选峰值
             if diagnosticMode {
                 let energyConcentration = calculateEnergyConcentration(samples: samples)
@@ -328,7 +335,7 @@ actor AudioAnalyzer: AudioAnalyzing {
                     spectralFeatures: spectralFeatures,
                     confidenceBreakdown: breakdown,
                     passed: false,
-                    rejectionReason: "持续时间不符合范围 (\(String(format: "%.3f", eventDuration))s, 需要 0.01-0.15s) 且振幅过低",
+                    rejectionReason: "持续时间不符合范围 (\(String(format: "%.3f", eventDuration))s, 需要 0.0003-0.15s) 且振幅过低 (<0.25)",
                     rejectionStage: FilteringStage.durationFilter.rawValue
                 )
             }
@@ -356,8 +363,9 @@ actor AudioAnalyzer: AudioAnalyzing {
 
         // 8. 只返回置信度足够高的峰值
         // 收紧条件：提高置信度阈值，减少误报
-        // 对于明显的峰值（幅度很高），可以稍微放宽置信度要求
-        let confidenceThreshold = peakAmplitude > 0.5 ? config.minimumConfidence * 0.9 : config.minimumConfidence
+        // 优化：对于明显的峰值（幅度 >0.35），放宽置信度要求
+        // 理由：高振幅峰值(0.35-0.5)更可能是真实击球，允许更低的置信度阈值
+        let confidenceThreshold = peakAmplitude > 0.35 ? config.minimumConfidence * 0.85 : config.minimumConfidence
 
         // 📊 诊断：记录候选峰值（通过或拒绝）
         if diagnosticMode {
@@ -1260,9 +1268,9 @@ struct AudioAnalysisConfiguration {
 
     /// 默认配置（平衡准确率和召回率）
     static let `default` = AudioAnalysisConfiguration(
-        peakThreshold: 0.25,  // 提高阈值，减少误报（原来0.15）
-        minimumConfidence: 0.50,  // P1修复：降至0.50，减少AudioAnalyzer过度过滤（原0.55）
-        minimumPeakInterval: 0.18  // 增加最小间隔，避免过于密集的误识别（原来0.12）
+        peakThreshold: 0.25,  // 平衡设置：0.25 既能检测击球又能减少误报
+        minimumConfidence: 0.65,  // 提高置信度阈值，减少误报（从0.50提升）
+        minimumPeakInterval: 0.25  // 最小间隔 0.25s，避免重复检测和过密峰值
     )
 
     /// 严格配置（减少误报）
