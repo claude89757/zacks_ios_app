@@ -650,14 +650,15 @@ actor RallyDetectionEngine {
         // 计算击球密度（用于判断回合类型）
         let hitDensity = Double(cluster.count) / rally.duration
 
-        // 定义三种有效的回合模式（满足任一即可）
-        // P1修复：降低要求，提高召回率
-        let standardRally = cluster.count >= 3 && rally.duration >= 2.5  // 标准回合：>= 3击，>= 2.5秒（原4击，3秒）
-        let shortFastRally = cluster.count >= 2 && hitDensity >= 0.5     // 短快回合：>= 2击，高密集（原3击，0.4）
-        let longSlowRally = cluster.count >= 3 && rally.duration >= 4.0  // 长慢回合：>= 3击，>= 4秒（原5秒）
+        // 定义四种有效的回合模式（满足任一即可）
+        // 慢节奏优化：支持业余/慢节奏比赛（平均间隔5-8秒）
+        let standardRally = cluster.count >= 2 && rally.duration >= 2.0  // 标准回合：>= 2击，>= 2.0秒（降低要求）
+        let shortFastRally = cluster.count >= 2 && hitDensity >= 0.25    // 快速回合：>= 2击，密度≥0.25（降低密度要求）
+        let longSlowRally = cluster.count >= 2 && rally.duration >= 3.5  // 长慢回合：>= 2击，>= 3.5秒（降低要求）
+        let casualRally = cluster.count >= 2 && rally.duration <= 60.0   // 业余回合：>= 2击，时长合理（新增慢节奏模式）
 
         // 至少满足一种回合模式
-        guard standardRally || shortFastRally || longSlowRally else {
+        guard standardRally || shortFastRally || longSlowRally || casualRally else {
             return false
         }
 
@@ -666,13 +667,14 @@ actor RallyDetectionEngine {
             let intervals = zip(cluster.dropFirst(), cluster).map { $0.time - $1.time }
             let avgInterval = intervals.reduce(0, +) / Double(intervals.count)
 
-            // 平均击球间隔应该在合理范围内（0.2秒到7秒）
-            guard avgInterval >= 0.2 && avgInterval <= 7.0 else { return false }
+            // 平均击球间隔应该在合理范围内（0.2秒到10秒）
+            // 放宽上限：支持慢节奏比赛（发球准备、场地切换等）
+            guard avgInterval >= 0.2 && avgInterval <= 10.0 else { return false }
 
             // 检查是否有异常长的间隔（可能是误检）
-            // 放宽条件：允许有1-2个间隔超过阈值（可能是回合中的暂停）
-            let longIntervals = intervals.filter { $0 > config.maxHitInterval * 1.3 }
-            if longIntervals.count > 2 {
+            // 进一步放宽条件：允许有更多长间隔（慢节奏比赛常见）
+            let longIntervals = intervals.filter { $0 > config.maxHitInterval * 1.5 }  // 1.3 → 1.5
+            if longIntervals.count > 3 {  // 2 → 3
                 return false
             }
         }
@@ -993,7 +995,44 @@ class RallyBuilder {
 }
 
     */
+
+// MARK: - Configuration
+
 /// 回合检测配置
+///
+/// 提供三种预设配置，针对不同比赛节奏优化：
+///
+/// **1. `.default` - 默认配置（推荐）**
+/// - 适用场景：业余/中等水平比赛
+/// - 比赛特征：平均击球间隔 3-8 秒
+/// - 使用示例：
+///   ```swift
+///   let engine = RallyDetectionEngine(config: .default)
+///   ```
+///
+/// **2. `.lenient` - 宽松配置**
+/// - 适用场景：初学者、慢节奏业余比赛
+/// - 比赛特征：平均击球间隔 5-10 秒
+/// - 特点：最大召回率，允许更长间隔和更少击球
+/// - 使用示例：
+///   ```swift
+///   let engine = RallyDetectionEngine(config: .lenient)
+///   ```
+///
+/// **3. `.strict` - 严格配置**
+/// - 适用场景：专业/高水平比赛，噪声环境
+/// - 比赛特征：平均击球间隔 1.5-3 秒
+/// - 特点：降低误报，提高精确度
+/// - 使用示例：
+///   ```swift
+///   let engine = RallyDetectionEngine(config: .strict)
+///   ```
+///
+/// **配置选择指南：**
+/// - 如果检测到 0 个回合 → 使用 `.lenient`
+/// - 如果检测到过多误报回合 → 使用 `.strict`
+/// - 一般情况 → 使用 `.default`
+///
 struct RallyDetectionConfiguration {
     // MARK: - 音频密集度判断参数
 
@@ -1024,12 +1063,13 @@ struct RallyDetectionConfiguration {
     // let maxPauseDuration: Double
     // let ballVelocityThreshold: Double
 
-    /// 默认配置：综合场景下的折中方案
+    /// 默认配置：综合场景下的平衡方案（支持慢节奏比赛）
+    /// 适用场景：业余/中等水平比赛，平均击球间隔3-6秒
     static let `default` = RallyDetectionConfiguration(
-        minRallyDuration: 3.0,
+        minRallyDuration: 2.5,  // 3.0 → 2.5：降低最小回合时长
         audioConfidenceThreshold: 0.50,  // Critical修复：与AudioAnalyzer统一为0.50（原0.55）
-        maxHitInterval: 5.5,  // 回合内正常击球间隔上限（5-6秒，适应发球准备等）
-        minHitCount: 3,  // Critical修复：与isValidRally统一为3（原4）
+        maxHitInterval: 8.0,  // 5.5 → 8.0：提高间隔上限，适应慢节奏比赛
+        minHitCount: 2,  // 3 → 2：降低最小击球数，提高召回率
         preHitPadding: 1.5,   // 保留发球/准备动作（1.5秒）
         postHitPadding: 1.8,  // 保留击球后的完整动作（1.8秒）
         enableDebugLogging: false
@@ -1046,15 +1086,17 @@ struct RallyDetectionConfiguration {
         enableDebugLogging: false
     )
 
-    /// 宽松配置：适合音频质量一般、希望提高召回率
+    /// 宽松配置：专门针对慢节奏/业余比赛优化
+    /// 适用场景：初学者、业余比赛，平均击球间隔5-10秒
+    /// 特点：最大程度提高召回率，允许更长的击球间隔和更少的击球次数
     static let lenient = RallyDetectionConfiguration(
-        minRallyDuration: 2.0,
-        audioConfidenceThreshold: 0.5,
-        maxHitInterval: 7.0,  // 允许更长的间隔（适应慢节奏比赛）
-        minHitCount: 3,
-        preHitPadding: 1.8,
+        minRallyDuration: 2.0,  // 保持较低的时长要求
+        audioConfidenceThreshold: 0.45,  // 0.5 → 0.45：进一步降低置信度要求
+        maxHitInterval: 10.0,  // 7.0 → 10.0：大幅提高间隔上限，适应慢节奏比赛
+        minHitCount: 2,  // 3 → 2：降低最小击球数
+        preHitPadding: 1.8,  // 保留更多上下文
         postHitPadding: 2.2,
-        enableDebugLogging: false
+        enableDebugLogging: true  // 默认开启调试日志，便于优化
     )
 
     /// 调试配置：启用详细日志
