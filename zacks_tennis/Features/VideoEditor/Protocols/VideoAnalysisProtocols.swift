@@ -60,6 +60,13 @@ protocol AudioAnalyzing: Actor {
     /// - Returns: 音频分析结果
     func analyzeAudio(from asset: AVAsset, timeRange: CMTimeRange) async throws -> AudioAnalysisResult
 
+    /// 🚀 并行分析音频轨道（性能优化：适用于长音频）
+    /// - Parameters:
+    ///   - asset: 视频资源
+    ///   - timeRange: 时间范围
+    /// - Returns: 音频分析结果
+    func analyzeAudioParallel(from asset: AVAsset, timeRange: CMTimeRange) async throws -> AudioAnalysisResult
+
     /// 更新音频分析配置
     /// - Parameter newConfig: 新配置
     func updateConfig(_ newConfig: AudioAnalysisConfiguration) async
