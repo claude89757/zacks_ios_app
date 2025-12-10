@@ -17,9 +17,6 @@ struct zacks_tennisApp: App {
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
             // 核心数据模型
-            Court.self,
-            User.self,
-            NotificationItem.self,
             Video.self,
             VideoHighlight.self,  // AI 视频剪辑：回合视频片段
         ])
