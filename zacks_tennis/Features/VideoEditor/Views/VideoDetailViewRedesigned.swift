@@ -2,7 +2,8 @@
 //  VideoDetailViewRedesigned.swift
 //  zacks_tennis
 //
-//  视频详情页（重新设计）- 3列网格布局 + 核心统计 + 固定底部导出
+//  视频详情页（重新设计）- 3列网格布局 + 筛选 + 固定底部导出
+//  UX优化: 筛选功能、Toast反馈、触觉反馈
 //
 
 import SwiftUI
@@ -20,21 +21,47 @@ struct VideoDetailViewRedesigned: View {
     @State private var showExportOptions = false
     @State private var showDeleteAlert = false
 
+    // 筛选状态
+    @State private var filterOption: FilterOption = .all
+
     // 选择模式状态
     @State private var isSelecting = false
     @State private var selectedRallies: Set<VideoHighlight.ID> = []
     @State private var showBatchDeleteAlert = false
 
+    // Toast 状态
+    @State private var showToast = false
+    @State private var toastMessage = ""
+    @State private var toastIcon = "checkmark.circle.fill"
+    @State private var toastIconColor: Color = .green
+
     // 调试工具状态
     @State private var showingTimeline = false
     @State private var showingDebugTools = false
 
+    /// 筛选后的回合列表
+    private var filteredRallies: [VideoHighlight] {
+        switch filterOption {
+        case .all:
+            return video.highlights
+        case .favorites:
+            return video.highlights.filter { $0.isFavorite }
+        case .exciting:
+            return video.highlights.filter { $0.isExciting }
+        case .long:
+            return video.highlights.filter { $0.duration > 10 }
+        }
+    }
+
     var body: some View {
         ScrollView {
-            VStack(spacing: 24) {
+            VStack(spacing: 16) {
+                // 筛选区域
+                filterSection
+
                 // 回合网格（3列布局）
                 RallyGridSection(
-                    rallies: video.highlights,
+                    rallies: filteredRallies,
                     video: video,
                     selectedRally: $selectedRally,
                     showPlayer: $showRallyPlayer,
@@ -55,6 +82,7 @@ struct VideoDetailViewRedesigned: View {
             if isSelecting {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("取消") {
+                        HapticManager.shared.exitSelection()
                         withAnimation {
                             exitSelectionMode()
                         }
@@ -65,7 +93,8 @@ struct VideoDetailViewRedesigned: View {
             // 选择模式：右侧显示"全选/取消全选"按钮
             if isSelecting {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button(selectedRallies.count == video.highlights.count ? "取消全选" : "全选") {
+                    Button(selectedRallies.count == filteredRallies.count ? "取消全选" : "全选") {
+                        HapticManager.shared.selectAll()
                         toggleSelectAll()
                     }
                 }
@@ -75,6 +104,7 @@ struct VideoDetailViewRedesigned: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button {
+                            HapticManager.shared.enterSelection()
                             withAnimation {
                                 isSelecting = true
                             }
@@ -133,8 +163,9 @@ struct VideoDetailViewRedesigned: View {
                 // 选择模式：显示选择工具栏
                 SelectionToolbar(
                     selectedCount: selectedRallies.count,
-                    allSelected: selectedRallies.count == video.highlights.count,
+                    allSelected: selectedRallies.count == filteredRallies.count,
                     onDelete: {
+                        HapticManager.shared.warning()
                         showBatchDeleteAlert = true
                     },
                     onToggleFavorite: {
@@ -152,9 +183,9 @@ struct VideoDetailViewRedesigned: View {
         }
         // 全屏播放器
         .fullScreenCover(isPresented: $showRallyPlayer) {
-            if !video.highlights.isEmpty {
+            if !filteredRallies.isEmpty {
                 RallyPlayerView(
-                    rallies: video.highlights,
+                    rallies: filteredRallies,
                     video: video,
                     selectedRally: $selectedRally
                 )
@@ -193,6 +224,50 @@ struct VideoDetailViewRedesigned: View {
         .sheet(isPresented: $showingDebugTools) {
             DebugToolsSheetView(video: video)
         }
+        // Toast 提示
+        .toast(
+            isShowing: $showToast,
+            message: toastMessage,
+            icon: toastIcon,
+            iconColor: toastIconColor
+        )
+    }
+
+    // MARK: - Filter Section
+
+    private var filterSection: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 12) {
+                ForEach(FilterOption.allCases, id: \.self) { option in
+                    FilterChip(
+                        title: option.title,
+                        icon: option.icon,
+                        isSelected: filterOption == option,
+                        count: countForFilter(option)
+                    )
+                    .onTapGesture {
+                        HapticManager.shared.select()
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                            filterOption = option
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 获取各筛选选项的数量
+    private func countForFilter(_ option: FilterOption) -> Int {
+        switch option {
+        case .all:
+            return video.highlights.count
+        case .favorites:
+            return video.highlights.filter { $0.isFavorite }.count
+        case .exciting:
+            return video.highlights.filter { $0.isExciting }.count
+        case .long:
+            return video.highlights.filter { $0.duration > 10 }.count
+        }
     }
 
     // MARK: - Actions
@@ -213,17 +288,18 @@ struct VideoDetailViewRedesigned: View {
 
     /// 全选/取消全选
     private func toggleSelectAll() {
-        if selectedRallies.count == video.highlights.count {
+        if selectedRallies.count == filteredRallies.count {
             // 当前全选，执行取消全选
             selectedRallies.removeAll()
         } else {
             // 执行全选
-            selectedRallies = Set(video.highlights.map { $0.id })
+            selectedRallies = Set(filteredRallies.map { $0.id })
         }
     }
 
     /// 批量删除
     private func batchDelete() {
+        let count = selectedRallies.count
         let ralliesToDelete = video.highlights.filter { selectedRallies.contains($0.id) }
 
         for rally in ralliesToDelete {
@@ -231,12 +307,18 @@ struct VideoDetailViewRedesigned: View {
         }
 
         try? modelContext.save()
+
+        // 显示 Toast
+        HapticManager.shared.success()
+        showToastMessage("已删除 \(count) 个回合", icon: "trash.fill", color: .red)
+
         exitSelectionMode()
     }
 
     /// 批量切换收藏状态
     private func batchToggleFavorite() {
         let selectedHighlights = video.highlights.filter { selectedRallies.contains($0.id) }
+        let count = selectedHighlights.count
 
         // 如果所有选中项都已收藏，则取消收藏；否则全部收藏
         let allFavorited = selectedHighlights.allSatisfy { $0.isFavorite }
@@ -246,6 +328,23 @@ struct VideoDetailViewRedesigned: View {
         }
 
         try? modelContext.save()
+
+        // 触觉反馈和 Toast
+        HapticManager.shared.success()
+
+        if allFavorited {
+            showToastMessage("已取消收藏 \(count) 个回合", icon: "heart.slash", color: .gray)
+        } else {
+            showToastMessage("已收藏 \(count) 个回合", icon: "heart.fill", color: .red)
+        }
+    }
+
+    /// 显示 Toast 消息
+    private func showToastMessage(_ message: String, icon: String, color: Color) {
+        toastMessage = message
+        toastIcon = icon
+        toastIconColor = color
+        showToast = true
     }
 }
 
@@ -292,6 +391,8 @@ private func createSampleVideo() -> Video {
             videoFilePath: "",
             type: "rally"
         )
+        // 随机设置一些为收藏
+        highlight.isFavorite = i % 3 == 0
         video.highlights.append(highlight)
     }
 

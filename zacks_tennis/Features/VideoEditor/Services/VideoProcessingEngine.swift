@@ -93,7 +93,7 @@ final class VideoProcessingEngine: VideoProcessing {
 
         self.init(
             visionAnalyzer: VisionAnalyzer(),
-            audioAnalyzer: AudioAnalyzer(),
+            audioAnalyzer: SimpleHitDetector(),  // 使用极简检测器替代 AudioAnalyzer
             ballTracker: tracker,
             ballVisualizer: visualizer,
             stateManager: ProcessingStateManager.shared

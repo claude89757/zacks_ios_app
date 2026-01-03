@@ -258,3 +258,174 @@ extension BayesianChangePointDetector {
         let maxHitInterval: Double
     }
 }
+
+// MARK: - Phase 3 优化：自适应先验更新
+
+extension BayesianChangePointDetector {
+
+    /// 🚀 检测结果（用于先验更新）
+    struct DetectionResult {
+        let rallyStartTime: Double
+        let rallyEndTime: Double
+        let hitTimestamps: [Double]
+        let wasCorrect: Bool?  // 可选：用户反馈
+    }
+
+    /// 🚀 基于历史检测结果更新先验参数
+    /// 使用 MLE（最大似然估计）更新分布参数
+    /// - Parameter history: 历史检测结果
+    /// - Returns: 更新后的配置
+    static func updatePriors(from history: [DetectionResult]) -> Config {
+        guard history.count >= 3 else {
+            return .default  // 样本太少，使用默认配置
+        }
+
+        // 1. 提取回合内间隔
+        var withinRallyIntervals: [Double] = []
+        for result in history {
+            let timestamps = result.hitTimestamps.sorted()
+            for i in 1..<timestamps.count {
+                let interval = timestamps[i] - timestamps[i-1]
+                if interval > 0.1 && interval < 8.0 {  // 合理范围
+                    withinRallyIntervals.append(interval)
+                }
+            }
+        }
+
+        // 2. 提取回合间间隔
+        var betweenRallyIntervals: [Double] = []
+        let sortedResults = history.sorted { $0.rallyStartTime < $1.rallyStartTime }
+        for i in 1..<sortedResults.count {
+            let interval = sortedResults[i].rallyStartTime - sortedResults[i-1].rallyEndTime
+            if interval > 2.0 && interval < 60.0 {  // 合理范围
+                betweenRallyIntervals.append(interval)
+            }
+        }
+
+        // 3. MLE 估计回合内参数
+        let (withinMean, withinStdDev) = mleNormalParameters(withinRallyIntervals)
+
+        // 4. MLE 估计回合间参数
+        let (betweenMean, betweenStdDev) = mleNormalParameters(betweenRallyIntervals)
+
+        // 5. 应用保护边界
+        let safeWithinMean = max(0.4, min(withinMean, 4.0))
+        let safeWithinStdDev = max(0.2, min(withinStdDev, 2.0))
+        let safeBetweenMean = max(5.0, min(betweenMean, 30.0))
+        let safeBetweenStdDev = max(1.5, min(betweenStdDev, 10.0))
+
+        return Config(
+            hazardRate: 0.05,
+            withinRallyMean: safeWithinMean,
+            withinRallyStdDev: safeWithinStdDev,
+            betweenRallyMean: safeBetweenMean,
+            betweenRallyStdDev: safeBetweenStdDev,
+            minRallyLength: 3,
+            debugLogging: false
+        )
+    }
+
+    /// MLE 估计正态分布参数
+    private static func mleNormalParameters(_ samples: [Double]) -> (mean: Double, stdDev: Double) {
+        guard !samples.isEmpty else {
+            return (2.5, 0.8)  // 默认值
+        }
+
+        let mean = samples.reduce(0, +) / Double(samples.count)
+
+        guard samples.count > 1 else {
+            return (mean, 0.8)
+        }
+
+        let variance = samples.map { pow($0 - mean, 2) }.reduce(0, +) / Double(samples.count - 1)
+        let stdDev = sqrt(variance)
+
+        return (mean, max(stdDev, 0.1))  // 最小标准差 0.1
+    }
+
+    /// 🚀 计算检测置信度评分
+    /// 用于评估当前配置的效果
+    /// - Parameter results: 变化点检测结果
+    /// - Returns: 置信度评分 [0, 1]
+    static func evaluateDetectionConfidence(_ results: [ChangePointResult]) -> Double {
+        guard !results.isEmpty else { return 0 }
+
+        // 指标1：变化点概率的一致性（方差越小越好）
+        let probabilities = results.map { $0.probability }
+        let meanProb = probabilities.reduce(0, +) / Double(probabilities.count)
+        let variance = probabilities.map { pow($0 - meanProb, 2) }.reduce(0, +) / Double(probabilities.count)
+        let consistencyScore = max(0, 1.0 - sqrt(variance) * 2)
+
+        // 指标2：运行长度的合理性（大多数回合应该有 3-15 个击球）
+        let runLengths = results.filter { $0.isChangePoint }.map { $0.runLength }
+        let reasonableRuns = runLengths.filter { $0 >= 3 && $0 <= 15 }.count
+        let reasonabilityScore = runLengths.isEmpty ? 0.5 :
+            Double(reasonableRuns) / Double(runLengths.count)
+
+        // 指标3：变化点间隔的规律性
+        let changePoints = results.filter { $0.isChangePoint }
+        var intervalScores: [Double] = []
+        for i in 1..<changePoints.count {
+            let interval = changePoints[i].time - changePoints[i-1].time
+            // 合理的回合间隔应该在 5-30 秒
+            if interval >= 5 && interval <= 30 {
+                intervalScores.append(1.0)
+            } else if interval >= 3 && interval <= 45 {
+                intervalScores.append(0.5)
+            } else {
+                intervalScores.append(0.2)
+            }
+        }
+        let intervalScore = intervalScores.isEmpty ? 0.5 :
+            intervalScores.reduce(0, +) / Double(intervalScores.count)
+
+        // 综合评分
+        return consistencyScore * 0.3 + reasonabilityScore * 0.4 + intervalScore * 0.3
+    }
+
+    /// 🚀 自动选择最优配置
+    /// 尝试多个配置，选择效果最好的
+    /// - Parameter peaks: 音频峰值
+    /// - Returns: 最优配置和对应的检测结果
+    func autoSelectConfig(peaks: [AudioPeak]) -> (config: Config, results: [ChangePointResult], score: Double) {
+        let configs: [Config] = [
+            .default,
+            Config(
+                hazardRate: 0.03,
+                withinRallyMean: 2.0,
+                withinRallyStdDev: 0.6,
+                betweenRallyMean: 8.0,
+                betweenRallyStdDev: 2.5,
+                minRallyLength: 3,
+                debugLogging: false
+            ),
+            Config(
+                hazardRate: 0.08,
+                withinRallyMean: 3.0,
+                withinRallyStdDev: 1.0,
+                betweenRallyMean: 12.0,
+                betweenRallyStdDev: 4.0,
+                minRallyLength: 3,
+                debugLogging: false
+            )
+        ]
+
+        var bestConfig = Config.default
+        var bestResults: [ChangePointResult] = []
+        var bestScore: Double = 0
+
+        for config in configs {
+            let detector = BayesianChangePointDetector(config: config)
+            let results = detector.detectChangePoints(peaks: peaks)
+            let score = BayesianChangePointDetector.evaluateDetectionConfidence(results)
+
+            if score > bestScore {
+                bestScore = score
+                bestConfig = config
+                bestResults = results
+            }
+        }
+
+        return (bestConfig, bestResults, bestScore)
+    }
+}
