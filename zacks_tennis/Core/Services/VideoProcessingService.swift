@@ -229,12 +229,15 @@ class VideoProcessingService {
             throw VideoError.exportFailedWithReason("无法创建视频轨道")
         }
 
-        var compositionAudioTrack: AVMutableCompositionTrack?
-        if !audioTracks.isEmpty {
-            compositionAudioTrack = composition.addMutableTrack(
+        // 🔧 修复：为每个音频轨道创建对应的组合轨道（支持多音频轨道）
+        var compositionAudioTracks: [AVMutableCompositionTrack] = []
+        for _ in audioTracks {
+            if let compositionAudioTrack = composition.addMutableTrack(
                 withMediaType: .audio,
                 preferredTrackID: kCMPersistentTrackID_Invalid
-            )
+            ) {
+                compositionAudioTracks.append(compositionAudioTrack)
+            }
         }
 
         // 按时间顺序添加每个片段
@@ -256,14 +259,15 @@ class VideoProcessingService {
                     at: currentTime
                 )
 
-                // 插入音频片段（如果有）
-                if let compositionAudioTrack = compositionAudioTrack,
-                   let audioTrack = audioTracks.first {
-                    try compositionAudioTrack.insertTimeRange(
-                        timeRange,
-                        of: audioTrack,
-                        at: currentTime
-                    )
+                // 🔧 修复：插入所有音频轨道（保留多轨道音频）
+                for (trackIndex, audioTrack) in audioTracks.enumerated() {
+                    if trackIndex < compositionAudioTracks.count {
+                        try compositionAudioTracks[trackIndex].insertTimeRange(
+                            timeRange,
+                            of: audioTrack,
+                            at: currentTime
+                        )
+                    }
                 }
 
                 currentTime = CMTimeAdd(currentTime, timeRange.duration)
@@ -302,6 +306,9 @@ class VideoProcessingService {
         // 检查导出状态
         switch exportSession.status {
         case .completed:
+            // 🔧 添加：导出文件完整性验证
+            try await verifyExportedFile(at: outputURL)
+
             let fileSize = try getFileSize(from: outputURL)
             print("✅ 合并完成: \(fileName)")
             print("   文件大小: \(ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file))")
@@ -316,16 +323,51 @@ class VideoProcessingService {
             )
 
         case .failed:
+            // 🔧 添加：取消时清理不完整文件
+            try? FileManager.default.removeItem(at: outputURL)
             let errorMsg = exportSession.error?.localizedDescription ?? "未知错误"
             print("❌ 导出失败: \(errorMsg)")
             throw VideoError.exportFailedWithReason("视频合并失败: \(errorMsg)")
 
         case .cancelled:
+            // 🔧 添加：取消时清理不完整文件
+            try? FileManager.default.removeItem(at: outputURL)
             throw VideoError.exportFailedWithReason("导出已取消")
 
         default:
             throw VideoError.exportFailed
         }
+    }
+
+    /// 验证导出文件的完整性
+    private func verifyExportedFile(at url: URL) async throws {
+        // 1. 验证文件存在
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw VideoError.exportFailedWithReason("导出文件不存在")
+        }
+
+        // 2. 验证文件大小 > 0
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        let size = attributes[.size] as? Int64 ?? 0
+        guard size > 0 else {
+            try? FileManager.default.removeItem(at: url)
+            throw VideoError.exportFailedWithReason("导出文件为空")
+        }
+
+        // 3. 验证文件可读
+        guard FileManager.default.isReadableFile(atPath: url.path) else {
+            throw VideoError.exportFailedWithReason("导出文件不可读")
+        }
+
+        // 4. 验证视频可播放
+        let asset = AVAsset(url: url)
+        let isPlayable = try await asset.load(.isPlayable)
+        guard isPlayable else {
+            try? FileManager.default.removeItem(at: url)
+            throw VideoError.exportFailedWithReason("导出的视频文件损坏或不可播放")
+        }
+
+        print("✅ 文件验证通过: \(url.lastPathComponent)")
     }
 
     /// 导出带网球标注的精彩片段（调试用）
@@ -478,6 +520,9 @@ class VideoProcessingService {
                 statusDescription = "未知(\(exportSession.status.rawValue))"
             }
 
+            // 🔧 添加：导出失败时清理不完整文件
+            try? FileManager.default.removeItem(at: outputURL)
+
             if let error = exportSession.error {
                 print("   ❌ 导出失败: \(statusDescription)")
                 print("   错误详情: \(error.localizedDescription)")
@@ -487,6 +532,9 @@ class VideoProcessingService {
                 throw VideoError.exportFailedWithReason("导出状态: \(statusDescription)")
             }
         }
+
+        // 🔧 添加：导出文件完整性验证
+        try await verifyExportedFile(at: outputURL)
 
         let fileSize = try getFileSize(from: outputURL)
         print("   ✅ 导出成功! 文件大小: \(fileSize) bytes")

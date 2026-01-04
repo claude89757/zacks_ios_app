@@ -58,37 +58,79 @@ enum ExportType {
     }
 }
 
-/// 导出质量选项
-enum ExportQuality {
-    case highest
-    case high
-    case medium
+/// 导出质量选项 - 统一版本
+enum ExportQuality: String, CaseIterable, Codable {
     case low
+    case medium
+    case high
+    case original
 
-    var presetName: String {
+    /// 统一的 AVAssetExportPreset（替代旧的 presetName）
+    var avPreset: String {
         switch self {
-        case .highest:
-            return AVAssetExportPresetHEVCHighestQuality
-        case .high:
-            return AVAssetExportPreset1920x1080
-        case .medium:
-            return AVAssetExportPreset1280x720
         case .low:
             return AVAssetExportPreset960x540
+        case .medium:
+            return AVAssetExportPreset1280x720
+        case .high:
+            return AVAssetExportPreset1920x1080
+        case .original:
+            return AVAssetExportPresetPassthrough
         }
     }
 
+    /// 兼容旧代码的属性名
+    var presetName: String { avPreset }
+
     var displayName: String {
         switch self {
-        case .highest:
-            return "最高质量（HEVC）"
-        case .high:
-            return "高质量（1080p）"
-        case .medium:
-            return "标准质量（720p）"
         case .low:
             return "节省空间（540p）"
+        case .medium:
+            return "标准质量（720p）"
+        case .high:
+            return "高质量（1080p）"
+        case .original:
+            return "原始质量"
         }
+    }
+
+    var description: String {
+        switch self {
+        case .low:
+            return "适合分享到社交媒体"
+        case .medium:
+            return "平衡大小与画质"
+        case .high:
+            return "适合本地收藏"
+        case .original:
+            return "保持原始分辨率"
+        }
+    }
+
+    /// 估算比特率 (bytes/second)，用于准确估算文件大小
+    var estimatedBitrate: Int64 {
+        switch self {
+        case .low:
+            return 500_000      // ~0.5 MB/s
+        case .medium:
+            return 1_500_000    // ~1.5 MB/s
+        case .high:
+            return 3_000_000    // ~3 MB/s
+        case .original:
+            return 5_000_000    // ~5 MB/s
+        }
+    }
+
+    /// 估算指定时长的文件大小（字节）
+    func estimatedFileSize(forDuration seconds: Double) -> Int64 {
+        Int64(seconds * Double(estimatedBitrate))
+    }
+
+    /// 格式化的文件大小估算
+    func formattedEstimatedSize(forDuration seconds: Double) -> String {
+        let bytes = estimatedFileSize(forDuration: seconds)
+        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 }
 

@@ -256,11 +256,16 @@ class VideoEditorViewModel {
         }
 
         // 🔥 性能优化：批量更新Rally检测结果（每10个或每15秒）
+        // 🔧 修复：使用 videoId 而不是强引用 video 对象，避免循环引用
+        let videoId = video.id
         processingEngine.onRallyDetected = { [weak self] rally in
             guard let self = self else { return }
 
+            // 通过 id 查找 video（避免强引用）
+            guard let targetVideo = self.videos.first(where: { $0.id == videoId }) else { return }
+
             // 仅在内存中累积
-            video.highlights.append(rally)
+            targetVideo.highlights.append(rally)
             self.rallyBatchCounter += 1
 
             // 计算距离上次更新的时间
@@ -269,7 +274,7 @@ class VideoEditorViewModel {
             // 🔥 只在满足条件时才更新UI（每10个rally或每15秒）
             if self.rallyBatchCounter >= 10 || timeSinceLastUpdate >= 15.0 {
                 Task { @MainActor in
-                    video.rallyCount = video.highlights.count
+                    targetVideo.rallyCount = targetVideo.highlights.count
                     self.rallyBatchCounter = 0
                     self.lastRallyUpdateTime = Date()
                 }
@@ -343,12 +348,16 @@ class VideoEditorViewModel {
         }
 
         // 设置实时回合检测回调（仅累积到内存，分析完成后统一保存）
-        processingEngine.onRallyDetected = { rally in
+        // 🔧 修复：使用 videoId 而不是强引用 video 对象，避免循环引用
+        let analyzeVideoId = video.id
+        processingEngine.onRallyDetected = { [weak self] rally in
+            guard let self = self else { return }
+            // 通过 id 查找 video（避免强引用）
+            guard let targetVideo = self.videos.first(where: { $0.id == analyzeVideoId }) else { return }
+
             // 仅在内存中累积，避免频繁的数据库I/O和列表刷新
-            video.highlights.append(rally)
-            video.rallyCount = video.highlights.count
-            // ❌ 移除：try? self.modelContext?.save()
-            // ❌ 移除：self.loadVideos()
+            targetVideo.highlights.append(rally)
+            targetVideo.rallyCount = targetVideo.highlights.count
         }
 
         do {
@@ -862,6 +871,107 @@ class VideoEditorViewModel {
         default:
             return .gray
         }
+    }
+
+    // MARK: - 新导出方法（使用 ExportManager）
+
+    /// 使用 ExportManager 导出视频片段
+    /// - Parameters:
+    ///   - video: 源视频
+    ///   - highlights: 要导出的片段列表
+    ///   - quality: 导出质量
+    ///   - mergeIntoSingle: 是否合并为单个视频
+    ///   - exportNamePrefix: 导出文件名前缀
+    func exportWithManager(
+        from video: Video,
+        highlights: [VideoHighlight],
+        quality: ExportQuality = .high,
+        mergeIntoSingle: Bool = true,
+        exportNamePrefix: String = "export"
+    ) async {
+        resetErrorState()
+
+        guard !highlights.isEmpty else {
+            errorMessage = "没有可导出的片段"
+            showError = true
+            return
+        }
+
+        // 创建导出配置
+        let highlightInfos = highlights.map { highlight in
+            HighlightInfo(
+                id: highlight.id,
+                startTime: highlight.startTime,
+                endTime: highlight.endTime
+            )
+        }
+
+        let config = ExportTaskConfiguration(
+            videoId: video.id,
+            videoFilePath: video.originalFilePath,
+            videoTitle: video.title,
+            highlights: highlightInfos,
+            quality: quality,
+            mergeIntoSingle: mergeIntoSingle,
+            exportNamePrefix: exportNamePrefix
+        )
+
+        do {
+            let exportedFiles = try await ExportManager.shared.startExport(config: config)
+
+            // 保存导出记录到视频模型
+            for file in exportedFiles {
+                video.addExportedFile(file)
+            }
+
+            try modelContext?.save()
+            loadVideos()
+
+            // 更新导出计数
+            if case .completed(let count) = ExportManager.shared.state {
+                exportedFileCount = count
+            }
+
+        } catch {
+            if let exportError = error as? ExportError {
+                errorMessage = exportError.localizedDescription
+                if let suggestion = exportError.recoverySuggestion {
+                    errorMessage = "\(errorMessage ?? "")\n\n建议：\(suggestion)"
+                }
+            } else {
+                handleError(error)
+            }
+            showError = true
+        }
+    }
+
+    /// 使用 ExportManager 导出最长的 N 个回合
+    func exportLongestWithManager(from video: Video, count: Int, quality: ExportQuality = .high) async {
+        let longestHighlights = video.getLongestHighlights(count: count)
+        await exportWithManager(
+            from: video,
+            highlights: longestHighlights,
+            quality: quality,
+            mergeIntoSingle: true,
+            exportNamePrefix: "longest\(count)"
+        )
+    }
+
+    /// 使用 ExportManager 导出收藏的回合
+    func exportFavoritesWithManager(from video: Video, quality: ExportQuality = .high) async {
+        let favorites = video.favoriteHighlights
+        await exportWithManager(
+            from: video,
+            highlights: favorites,
+            quality: quality,
+            mergeIntoSingle: true,
+            exportNamePrefix: "favorites"
+        )
+    }
+
+    /// 取消当前导出
+    func cancelCurrentExport() {
+        ExportManager.shared.cancelExport()
     }
 }
 

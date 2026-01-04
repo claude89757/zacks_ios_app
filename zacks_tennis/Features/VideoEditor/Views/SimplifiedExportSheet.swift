@@ -18,6 +18,9 @@ struct SimplifiedExportSheet: View {
     @State private var showSuccessAlert = false    // 控制成功提示
     @State private var exportedCount = 0           // 导出的视频数量
 
+    // 使用 ExportManager 进行导出
+    private var exportManager: ExportManager { ExportManager.shared }
+
     var body: some View {
         NavigationStack {
             List {
@@ -125,9 +128,36 @@ struct SimplifiedExportSheet: View {
             }
         }
         .overlay {
-            // 模态进度弹窗（导出时显示）
-            if showExportProgress {
-                ExportProgressDialog(viewModel: viewModel)
+            // 使用统一的进度视图（替代旧的 ExportProgressDialog）
+            if exportManager.state.isActive || showExportProgress {
+                UnifiedExportProgressView(
+                    exportManager: exportManager,
+                    onDismiss: {
+                        showExportProgress = false
+                        exportManager.reset()
+                        // 如果导出成功，显示成功提示
+                        if case .completed(let count) = exportManager.state {
+                            exportedCount = count
+                            showSuccessAlert = true
+                        }
+                    },
+                    onCancel: {
+                        exportManager.cancelExport()
+                        showExportProgress = false
+                    }
+                )
+            }
+        }
+        // 监听 ExportManager 状态变化
+        .onChange(of: exportManager.state) { _, newState in
+            if case .completed(let count) = newState {
+                showExportProgress = false
+                exportedCount = count
+                showSuccessAlert = true
+            } else if case .failed(let error) = newState {
+                showExportProgress = false
+                viewModel.errorMessage = error.localizedDescription
+                viewModel.showError = true
             }
         }
     }
@@ -136,47 +166,46 @@ struct SimplifiedExportSheet: View {
 
     private func exportLongest(_ count: Int) {
         Task {
-            // 显示模态进度弹窗
+            // 显示进度弹窗（ExportManager 会自动更新状态）
             showExportProgress = true
 
-            await viewModel.exportLongestHighlights(from: video, count: count)
+            // 使用新的 ExportManager 方法
+            let highlights = video.getLongestHighlights(count: count)
+            await viewModel.exportWithManager(
+                from: video,
+                highlights: highlights,
+                quality: .high,
+                mergeIntoSingle: true,
+                exportNamePrefix: "longest\(count)"
+            )
 
-            // 隐藏进度弹窗
-            showExportProgress = false
-
-            // 如果导出成功，显示成功提示
-            if !viewModel.showError && viewModel.exportedFileCount > 0 {
-                exportedCount = viewModel.exportedFileCount
-                showSuccessAlert = true
-            }
-            // 错误提示会自动通过 onChange 显示
+            // 状态变化会通过 onChange 处理
         }
     }
 
     private func exportFavorites() {
         guard !video.favoriteHighlights.isEmpty else { return }
         Task {
-            // 显示模态进度弹窗
+            // 显示进度弹窗
             showExportProgress = true
 
-            await viewModel.exportFavoriteHighlights(from: video)
+            // 使用新的 ExportManager 方法
+            await viewModel.exportWithManager(
+                from: video,
+                highlights: video.favoriteHighlights,
+                quality: .high,
+                mergeIntoSingle: true,
+                exportNamePrefix: "favorites"
+            )
 
-            // 隐藏进度弹窗
-            showExportProgress = false
-
-            // 如果导出成功，显示成功提示
-            if !viewModel.showError && viewModel.exportedFileCount > 0 {
-                exportedCount = viewModel.exportedFileCount
-                showSuccessAlert = true
-            }
-            // 错误提示会自动通过 onChange 显示
+            // 状态变化会通过 onChange 处理
         }
     }
 
     private func exportWithBallAnnotations() {
         guard !video.highlights.isEmpty else { return }
         Task {
-            // 显示模态进度弹窗
+            // 显示模态进度弹窗（这个保持使用旧方法，因为带标注导出逻辑不同）
             showExportProgress = true
 
             await viewModel.exportWithBallAnnotations(from: video)
