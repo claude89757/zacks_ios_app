@@ -329,7 +329,6 @@ struct RallyPlayerCard: View {
     let onPlaybackEnd: () -> Void
 
     @StateObject private var playerManager = VideoPlayerManager.shared
-    @State private var isPlayerReady = false
     @State private var playbackProgress: Double = 0
     @State private var timeObserver: Any?
     @State private var observedPlayer: AVPlayer?
@@ -343,12 +342,15 @@ struct RallyPlayerCard: View {
     @State private var playbackRate: Float = 1.0
     private let availableRates: [Float] = [0.5, 1.0, 1.5, 2.0]
 
+    // 防重入状态
+    @State private var lastLoadedRallyId: VideoHighlight.ID?
+
     private var isActive: Bool {
         currentIndex == index
     }
 
     private var shouldShowProgressBar: Bool {
-        isPlayerReady && isActive
+        playerManager.isPlayerReady && isActive
     }
 
     /// 当前播放时间
@@ -365,7 +367,7 @@ struct RallyPlayerCard: View {
     var body: some View {
         ZStack {
             // 视频播放器
-            if let player = playerManager.activePlayer, isPlayerReady {
+            if let player = playerManager.activePlayer, playerManager.isPlayerReady, isActive {
                 VideoPlayer(player: player) {
                     // 自定义控制层
                     ZStack {
@@ -663,25 +665,26 @@ struct RallyPlayerCard: View {
         removeTimeObserver()
 
         guard isActive else {
-            isPlayerReady = false
             playbackProgress = 0
+            lastLoadedRallyId = nil
             return
         }
+
+        // 防重入：如果已经为这个 rally 加载过，跳过
+        guard rally.id != lastLoadedRallyId else { return }
 
         guard let player = playerManager.activePlayer else {
-            isPlayerReady = false
             playbackProgress = 0
             return
         }
 
-        player.currentItem?.forwardPlaybackEndTime = CMTime(
-            seconds: rally.endTime,
-            preferredTimescale: 600
-        )
+        // 记录已加载的 rally ID
+        lastLoadedRallyId = rally.id
+
+        // 注意：forwardPlaybackEndTime 现在由 VideoPlayerManager 在 playerItem 准备好后统一设置
 
         playbackProgress = 0
         lastHitMarkerIndex = -1
-        isPlayerReady = true
         addTimeObserver(to: player)
         updateProgress(currentSeconds: player.currentTime().seconds)
 
@@ -695,8 +698,8 @@ struct RallyPlayerCard: View {
         removeTimeObserver()
 
         if !isActive {
-            isPlayerReady = false
             playbackProgress = 0
+            lastLoadedRallyId = nil
         }
 
         isScrubbing = false
@@ -852,10 +855,7 @@ struct RallyPlayerCard: View {
             return
         }
 
-        player.currentItem?.forwardPlaybackEndTime = CMTime(
-            seconds: rally.endTime,
-            preferredTimescale: 600
-        )
+        // 注意：forwardPlaybackEndTime 由 VideoPlayerManager 统一管理
 
         let currentSeconds = player.currentTime().seconds
         let startTime = CMTime(seconds: rally.startTime, preferredTimescale: 600)
@@ -904,10 +904,7 @@ struct RallyPlayerCard: View {
             wasPlayingBeforeScrub = isPlaying
             player.pause()
             HapticManager.shared.dragStart()
-            player.currentItem?.forwardPlaybackEndTime = CMTime(
-                seconds: rally.endTime,
-                preferredTimescale: 600
-            )
+            // forwardPlaybackEndTime 由 VideoPlayerManager 统一管理
         }
     }
 
@@ -942,10 +939,7 @@ struct RallyPlayerCard: View {
                 lastHitMarkerIndex = rally.audioPeakTimestamps.lastIndex(where: { $0 < relativeTime }) ?? -1
 
                 if wasPlayingBeforeScrub {
-                    player.currentItem?.forwardPlaybackEndTime = CMTime(
-                        seconds: rally.endTime,
-                        preferredTimescale: 600
-                    )
+                    // forwardPlaybackEndTime 由 VideoPlayerManager 统一管理
                     player.rate = playbackRate
                     isPlaying = true
                 }

@@ -27,6 +27,12 @@ final class VideoPlayerManager: ObservableObject {
     /// 当前活跃的播放器
     @Published private(set) var activePlayer: AVPlayer?
 
+    /// 当前播放器是否已准备就绪（currentItem.status == .readyToPlay）
+    @Published private(set) var isPlayerReady: Bool = false
+
+    /// 当前活跃播放器的播放时间范围
+    private var currentEndTime: Double?
+
     /// 播放器池大小限制
     private let maxPoolSize: Int = 5
 
@@ -99,14 +105,24 @@ final class VideoPlayerManager: ObservableObject {
     /// - Parameters:
     ///   - url: 视频 URL
     ///   - startTime: 开始时间（可选）
+    ///   - endTime: 结束时间（可选）
+    ///   - autoStart: 是否自动开始播放
     func play(url: URL, startTime: Double? = nil, endTime: Double? = nil, autoStart: Bool = true) {
+        // 重置就绪状态
+        isPlayerReady = false
+
         let player = getPlayer(for: url)
 
-        if let endTime = endTime {
-            let end = CMTime(seconds: endTime, preferredTimescale: 600)
-            player.currentItem?.forwardPlaybackEndTime = end
-        } else {
-            player.currentItem?.forwardPlaybackEndTime = .invalid
+        // 保存结束时间，在 playerItem 准备好后设置
+        currentEndTime = endTime
+
+        // 尝试设置 forwardPlaybackEndTime（如果 currentItem 已经存在）
+        applyEndTimeIfReady(to: player)
+
+        // 如果播放器已经缓存且 ready，立即恢复就绪状态
+        // （从播放器池获取的已缓存播放器不会再次触发 KVO .readyToPlay 回调）
+        if player.currentItem?.status == .readyToPlay {
+            isPlayerReady = true
         }
 
         guard let startTime = startTime else {
@@ -130,6 +146,18 @@ final class VideoPlayerManager: ObservableObject {
         }
     }
 
+    /// 当 playerItem 准备好时应用结束时间
+    private func applyEndTimeIfReady(to player: AVPlayer) {
+        guard let currentItem = player.currentItem else { return }
+
+        if let endTime = currentEndTime {
+            let end = CMTime(seconds: endTime, preferredTimescale: 600)
+            currentItem.forwardPlaybackEndTime = end
+        } else {
+            currentItem.forwardPlaybackEndTime = .invalid
+        }
+    }
+
     /// 暂停当前播放器
     func pause() {
         activePlayer?.pause()
@@ -138,6 +166,8 @@ final class VideoPlayerManager: ObservableObject {
     /// 停止并释放指定播放器
     /// - Parameter url: 视频 URL
     func releasePlayer(for url: URL) {
+        let wasActive = playerPool[url] != nil && activePlayer === playerPool[url]
+
         if let player = playerPool[url] {
             player.pause()
             player.replaceCurrentItem(with: nil)
@@ -148,8 +178,10 @@ final class VideoPlayerManager: ObservableObject {
         playerPool.removeValue(forKey: url)
         lastUsedTime.removeValue(forKey: url)
 
-        if activePlayer === playerPool[url] {
+        if wasActive {
             activePlayer = nil
+            isPlayerReady = false
+            currentEndTime = nil
         }
     }
 
@@ -172,6 +204,8 @@ final class VideoPlayerManager: ObservableObject {
         lastUsedTime.removeAll()
         statusObservers.removeAll()
         activePlayer = nil
+        isPlayerReady = false
+        currentEndTime = nil
     }
 
     /// 预加载视频
@@ -209,9 +243,28 @@ final class VideoPlayerManager: ObservableObject {
                 guard let self = self else { return }
 
                 Task { @MainActor in
-                    if status == .failed {
+                    switch status {
+                    case .readyToPlay:
+                        // 播放器已准备就绪，现在可以安全设置 forwardPlaybackEndTime
+                        if player === self.activePlayer {
+                            self.applyEndTimeIfReady(to: player)
+                            self.isPlayerReady = true
+                        }
+
+                    case .failed:
                         print("⚠️ 播放器加载失败: \(url)")
+                        if player === self.activePlayer {
+                            self.isPlayerReady = false
+                        }
                         self.releasePlayer(for: url)
+
+                    case .unknown:
+                        if player === self.activePlayer {
+                            self.isPlayerReady = false
+                        }
+
+                    @unknown default:
+                        break
                     }
                 }
             }
