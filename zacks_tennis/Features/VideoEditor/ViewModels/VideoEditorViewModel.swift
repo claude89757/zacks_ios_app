@@ -705,6 +705,12 @@ class VideoEditorViewModel {
             try? FileManager.default.removeItem(at: fileURL)
         }
 
+        // 删除音频诊断文件
+        if let diagnosticPath = video.audioDiagnosticDataPath {
+            let diagnosticURL = URL(fileURLWithPath: diagnosticPath)
+            try? FileManager.default.removeItem(at: diagnosticURL)
+        }
+
         // 从数据库删除
         modelContext?.delete(video)
         try? modelContext?.save()

@@ -273,8 +273,7 @@ struct VideoDetailViewRedesigned: View {
     // MARK: - Actions
 
     private func deleteVideo() {
-        modelContext.delete(video)
-        try? modelContext.save()
+        viewModel.deleteVideo(video)
         dismiss()
     }
 
