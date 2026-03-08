@@ -37,55 +37,63 @@ struct RallyPlayerView: View {
     }
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
+        GeometryReader { geometry in
+            let overlayLayout = RallyPlayerOverlayLayout(
+                containerSize: geometry.size,
+                safeAreaInsets: geometry.safeAreaInsets
+            )
 
-            if rallies.isEmpty {
-                emptyStateView
-            } else {
-                // 垂直滚动分页（iOS 17+ API）
-                ScrollView(.vertical, showsIndicators: false) {
-                    LazyVStack(spacing: 0) {
-                        ForEach(Array(rallies.enumerated()), id: \.element.id) { index, rally in
-                            RallyPlayerCard(
-                                index: index,
-                                currentIndex: currentIndex,
-                                rally: rally,
-                                video: video,
-                                isPlaying: $isPlaying,
-                                totalCount: rallies.count,
-                                onFavoriteToggle: {
-                                    toggleFavorite(rally)
-                                },
-                                onPlaybackEnd: {
-                                    handlePlaybackEnd(at: index)
-                                }
-                            )
-                            .id(rally.id)
-                            .containerRelativeFrame(.vertical)
+            ZStack {
+                Color.black.ignoresSafeArea()
+
+                if rallies.isEmpty {
+                    emptyStateView
+                } else {
+                    // 垂直滚动分页（iOS 17+ API）
+                    ScrollView(.vertical, showsIndicators: false) {
+                        LazyVStack(spacing: 0) {
+                            ForEach(Array(rallies.enumerated()), id: \.element.id) { index, rally in
+                                RallyPlayerCard(
+                                    index: index,
+                                    currentIndex: currentIndex,
+                                    rally: rally,
+                                    video: video,
+                                    overlayLayout: overlayLayout,
+                                    isPlaying: $isPlaying,
+                                    totalCount: rallies.count,
+                                    onFavoriteToggle: {
+                                        toggleFavorite(rally)
+                                    },
+                                    onPlaybackEnd: {
+                                        handlePlaybackEnd(at: index)
+                                    }
+                                )
+                                .id(rally.id)
+                                .containerRelativeFrame(.vertical)
+                            }
                         }
+                        .scrollTargetLayout()
                     }
-                    .scrollTargetLayout()
-                }
-                .scrollTargetBehavior(.paging)
-                .scrollPosition(id: $currentRallyId)
-                .scrollIndicators(.hidden)
-                .ignoresSafeArea()
-                .onChange(of: currentRallyId) { oldValue, newValue in
-                    handleRallyChange(from: oldValue, to: newValue)
-                }
+                    .scrollTargetBehavior(.paging)
+                    .scrollPosition(id: $currentRallyId)
+                    .scrollIndicators(.hidden)
+                    .ignoresSafeArea()
+                    .onChange(of: currentRallyId) { oldValue, newValue in
+                        handleRallyChange(from: oldValue, to: newValue)
+                    }
 
-                // 顶部导航栏
-                VStack {
-                    topNavigationBar
-                    Spacer()
-                }
+                    // 顶部导航栏
+                    VStack {
+                        topNavigationBar(layout: overlayLayout)
+                        Spacer()
+                    }
 
-                // 右侧垂直进度条
-                HStack {
-                    Spacer()
-                    verticalProgressIndicator
-                        .padding(.trailing, 8)
+                    // 右侧垂直进度条
+                    HStack {
+                        Spacer()
+                        verticalProgressIndicator(layout: overlayLayout)
+                            .padding(.trailing, overlayLayout.actionColumnTrailingPadding)
+                    }
                 }
             }
         }
@@ -109,7 +117,7 @@ struct RallyPlayerView: View {
 
     // MARK: - Top Navigation Bar
 
-    private var topNavigationBar: some View {
+    private func topNavigationBar(layout: RallyPlayerOverlayLayout) -> some View {
         HStack {
             // 关闭按钮
             Button {
@@ -155,31 +163,24 @@ struct RallyPlayerView: View {
                     .clipShape(Circle())
             }
         }
-        .padding(.horizontal)
-        .padding(.top, 50)
+        .padding(.leading, layout.leadingOverlayPadding)
+        .padding(.trailing, layout.trailingOverlayPadding)
+        .padding(.top, layout.topBarTopPadding)
     }
 
     // MARK: - Vertical Progress Indicator
 
     /// 右侧垂直进度条
-    private var verticalProgressIndicator: some View {
+    private func verticalProgressIndicator(layout: RallyPlayerOverlayLayout) -> some View {
         VStack(spacing: 3) {
             ForEach(0..<rallies.count, id: \.self) { index in
                 RoundedRectangle(cornerRadius: 2)
                     .fill(index == currentIndex ? Color.white : Color.white.opacity(0.3))
-                    .frame(width: index == currentIndex ? 5 : 4, height: calculateSegmentHeight())
+                    .frame(width: index == currentIndex ? 5 : 4, height: layout.progressSegmentHeight(for: rallies.count))
                     .animation(.easeInOut(duration: 0.2), value: currentIndex)
             }
         }
-        .padding(.vertical, 120) // 避开顶部和底部 UI
-    }
-
-    /// 计算每个进度条段的高度
-    private func calculateSegmentHeight() -> CGFloat {
-        let totalHeight: CGFloat = UIScreen.main.bounds.height - 300
-        let count = max(rallies.count, 1)
-        let segmentHeight = (totalHeight - CGFloat(count - 1) * 3) / CGFloat(count)
-        return max(4, min(segmentHeight, 20)) // 限制高度范围
+        .padding(.vertical, layout.progressIndicatorVerticalPadding)
     }
 
     // MARK: - Empty State
@@ -323,6 +324,7 @@ struct RallyPlayerCard: View {
     let currentIndex: Int
     let rally: VideoHighlight
     let video: Video
+    let overlayLayout: RallyPlayerOverlayLayout
     @Binding var isPlaying: Bool
     let totalCount: Int
     let onFavoriteToggle: () -> Void
@@ -392,69 +394,67 @@ struct RallyPlayerCard: View {
             }
 
             // 右侧信息栏
-            VStack {
+            HStack {
                 Spacer()
 
-                HStack {
-                    Spacer()
-
-                    VStack(spacing: 20) {
-                        // 收藏按钮
-                        Button {
-                            onFavoriteToggle()
-                            if rally.isFavorite {
-                                showHeartAnimation = true
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                                    showHeartAnimation = false
-                                }
-                            }
-                        } label: {
-                            VStack(spacing: 4) {
-                                Image(systemName: rally.isFavorite ? "heart.fill" : "heart")
-                                    .font(.system(size: 28))
-                                    .foregroundColor(rally.isFavorite ? .red : .white)
-                                    .scaleEffect(rally.isFavorite ? 1.1 : 1.0)
-                                    .animation(.spring(response: 0.3, dampingFraction: 0.5), value: rally.isFavorite)
-
-                                Text(rally.isFavorite ? "已收藏" : "收藏")
-                                    .font(.caption2)
-                                    .foregroundColor(.white)
+                VStack(spacing: overlayLayout.actionButtonSpacing) {
+                    // 收藏按钮
+                    Button {
+                        onFavoriteToggle()
+                        if rally.isFavorite {
+                            showHeartAnimation = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                                showHeartAnimation = false
                             }
                         }
-                        .accessibilityLabel(rally.isFavorite ? "取消收藏" : "收藏")
-                        .accessibilityHint("双击\(rally.isFavorite ? "取消" : "")收藏此回合")
+                    } label: {
+                        VStack(spacing: 4) {
+                            Image(systemName: rally.isFavorite ? "heart.fill" : "heart")
+                                .font(.system(size: overlayLayout.actionIconSize))
+                                .foregroundColor(rally.isFavorite ? .red : .white)
+                                .scaleEffect(rally.isFavorite ? 1.1 : 1.0)
+                                .animation(.spring(response: 0.3, dampingFraction: 0.5), value: rally.isFavorite)
 
-                        // 播放速度按钮
-                        Button {
-                            cyclePlaybackRate()
-                        } label: {
-                            VStack(spacing: 4) {
-                                Text(playbackRateText)
-                                    .font(.system(size: 14, weight: .bold, design: .monospaced))
-                                    .foregroundColor(.white)
-                                    .frame(width: 44, height: 44)
-                                    .background(Color.white.opacity(0.2))
-                                    .clipShape(Circle())
-
-                                Text("速度")
-                                    .font(.caption2)
-                                    .foregroundColor(.white)
-                            }
+                            Text(rally.isFavorite ? "已收藏" : "收藏")
+                                .font(.caption2)
+                                .foregroundColor(.white)
                         }
-                        .accessibilityLabel("播放速度 \(playbackRateText)")
-                        .accessibilityHint("双击切换播放速度")
+                    }
+                    .accessibilityLabel(rally.isFavorite ? "取消收藏" : "收藏")
+                    .accessibilityHint("双击\(rally.isFavorite ? "取消" : "")收藏此回合")
 
+                    // 播放速度按钮
+                    Button {
+                        cyclePlaybackRate()
+                    } label: {
+                        VStack(spacing: 4) {
+                            Text(playbackRateText)
+                                .font(.system(size: 14, weight: .bold, design: .monospaced))
+                                .foregroundColor(.white)
+                                .frame(width: overlayLayout.actionControlSize, height: overlayLayout.actionControlSize)
+                                .background(Color.white.opacity(0.2))
+                                .clipShape(Circle())
+
+                            Text("速度")
+                                .font(.caption2)
+                                .foregroundColor(.white)
+                        }
+                    }
+                    .accessibilityLabel("播放速度 \(playbackRateText)")
+                    .accessibilityHint("双击切换播放速度")
+
+                    if overlayLayout.showsSecondaryActions {
                         // 精彩度评分
                         VStack(spacing: 4) {
                             ZStack {
                                 Circle()
                                     .stroke(Color.white.opacity(0.3), lineWidth: 3)
-                                    .frame(width: 44, height: 44)
+                                    .frame(width: overlayLayout.actionControlSize, height: overlayLayout.actionControlSize)
 
                                 Circle()
                                     .trim(from: 0, to: rally.excitementScore / 100)
                                     .stroke(scoreColor, lineWidth: 3)
-                                    .frame(width: 44, height: 44)
+                                    .frame(width: overlayLayout.actionControlSize, height: overlayLayout.actionControlSize)
                                     .rotationEffect(.degrees(-90))
 
                                 Text("\(Int(rally.excitementScore))")
@@ -471,7 +471,7 @@ struct RallyPlayerCard: View {
                         // 时长
                         VStack(spacing: 4) {
                             Image(systemName: "clock")
-                                .font(.system(size: 24))
+                                .font(.system(size: overlayLayout.actionIconSize - 4))
                                 .foregroundColor(.white)
 
                             Text(rally.durationText)
@@ -479,18 +479,27 @@ struct RallyPlayerCard: View {
                                 .foregroundColor(.white)
                         }
                     }
-                    .padding(.trailing, 16)
                 }
+                .padding(.trailing, overlayLayout.actionColumnTrailingPadding)
+                .padding(.bottom, overlayLayout.actionColumnBottomPadding)
+            }
 
-                if shouldShowProgressBar {
+            if shouldShowProgressBar {
+                VStack {
+                    Spacer()
+
                     progressBar
                         .padding(.horizontal, 16)
-                        .padding(.bottom, 24)
+                        .padding(.bottom, overlayLayout.progressBarBottomPadding)
                 }
+            }
 
-                // 底部信息栏
+            // 底部信息栏
+            VStack {
+                Spacer()
+
                 HStack(alignment: .bottom) {
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: overlayLayout.isCompactHeight ? 6 : 8) {
                         // 回合序号和类型
                         HStack(spacing: 8) {
                             Text("#\(rally.rallyNumber)")
@@ -508,11 +517,11 @@ struct RallyPlayerCard: View {
                             Text(rally.rallyDescription)
                                 .font(.subheadline)
                                 .foregroundColor(.white.opacity(0.9))
-                                .lineLimit(2)
+                                .lineLimit(overlayLayout.descriptionLineLimit)
                         }
 
                         // 元数据标签
-                        if let metadata = rally.metadata {
+                        if overlayLayout.showsMetadataChips, let metadata = rally.metadata {
                             HStack(spacing: 8) {
                                 if metadata.hasAudioPeaks {
                                     Label("击球声", systemImage: "waveform")
@@ -537,10 +546,10 @@ struct RallyPlayerCard: View {
                         }
                     }
 
-                    Spacer()
+                    Spacer(minLength: overlayLayout.bottomInfoReservedTrailingWidth)
                 }
                 .padding(.horizontal, 16)
-                .padding(.bottom, 100)
+                .padding(.bottom, overlayLayout.bottomInfoBottomPadding(hasProgressBar: shouldShowProgressBar))
             }
 
             // 播放/暂停图标（临时显示）
@@ -609,7 +618,7 @@ struct RallyPlayerCard: View {
     private var doubleTapGesture: some Gesture {
         SpatialTapGesture(count: 2)
             .onEnded { value in
-                let screenWidth = UIScreen.main.bounds.width
+                let screenWidth = max(overlayLayout.containerSize.width, 1)
                 let tapX = value.location.x
 
                 if tapX < screenWidth / 2 {
@@ -839,7 +848,7 @@ struct RallyPlayerCard: View {
                 .gesture(scrubGesture(totalWidth: geometry.size.width))
             }
         }
-        .frame(height: isScrubbing ? 36 : 28)
+        .frame(height: isScrubbing ? 36 : overlayLayout.progressBarBaseHeight)
         .animation(.easeInOut(duration: 0.15), value: playbackProgress)
         .animation(.easeInOut(duration: 0.15), value: isScrubbing)
     }
