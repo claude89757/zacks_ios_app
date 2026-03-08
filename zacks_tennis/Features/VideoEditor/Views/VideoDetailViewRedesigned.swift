@@ -273,9 +273,13 @@ struct VideoDetailViewRedesigned: View {
     // MARK: - Actions
 
     private func deleteVideo() {
-        modelContext.delete(video)
-        try? modelContext.save()
-        dismiss()
+        do {
+            try viewModel.deleteVideo(video)
+            dismiss()
+        } catch {
+            viewModel.errorMessage = error.localizedDescription
+            viewModel.showError = true
+        }
     }
 
     // MARK: - Selection Mode Actions
