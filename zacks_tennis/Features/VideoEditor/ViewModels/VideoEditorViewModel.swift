@@ -687,35 +687,48 @@ class VideoEditorViewModel {
     // MARK: - Video Management
 
     /// 删除视频
-    func deleteVideo(_ video: Video) {
-        // 删除文件
+    func deleteVideo(_ video: Video) throws {
+        guard let context = modelContext else {
+            throw VideoDeletionError.missingModelContext
+        }
+
         let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let videoURL = documentsURL.appendingPathComponent(video.originalFilePath)
-
-        try? FileManager.default.removeItem(at: videoURL)
+        var cleanupTargets: [(url: URL, label: String)] = [(videoURL, "原视频文件")]
 
         if let thumbnailPath = video.thumbnailPath {
             let thumbnailURL = documentsURL.appendingPathComponent(thumbnailPath)
-            try? FileManager.default.removeItem(at: thumbnailURL)
+            cleanupTargets.append((thumbnailURL, "缩略图"))
         }
 
-        // 删除导出的文件
         for exportedFile in video.exportedFiles {
             let fileURL = documentsURL.appendingPathComponent(exportedFile.filePath)
-            try? FileManager.default.removeItem(at: fileURL)
+            cleanupTargets.append((fileURL, "导出文件 \(exportedFile.filePath)"))
         }
 
-        // 删除音频诊断文件
         if let diagnosticPath = video.audioDiagnosticDataPath {
             let diagnosticURL = URL(fileURLWithPath: diagnosticPath)
-            try? FileManager.default.removeItem(at: diagnosticURL)
+            cleanupTargets.append((diagnosticURL, "音频诊断文件"))
         }
 
-        // 从数据库删除
-        modelContext?.delete(video)
-        try? modelContext?.save()
+        context.delete(video)
+        do {
+            try context.save()
+        } catch {
+            context.rollback()
+            throw VideoDeletionError.persistenceFailed(error.localizedDescription)
+        }
 
         loadVideos()
+
+        let cleanupFailures = cleanupTargets.compactMap { target in
+            removeItemIfPresent(at: target.url, label: target.label)
+        }
+
+        if !cleanupFailures.isEmpty {
+            errorMessage = "视频已删除，但以下文件未完全清理：\(cleanupFailures.joined(separator: "、"))。"
+            showError = true
+        }
     }
 
     /// 更新视频标题
@@ -857,6 +870,19 @@ class VideoEditorViewModel {
         showError = false
     }
 
+    private func removeItemIfPresent(at url: URL, label: String) -> String? {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+
+        do {
+            try fileManager.removeItem(at: url)
+            return nil
+        } catch {
+            print("❌ 删除\(label)失败: \(url.path) - \(error.localizedDescription)")
+            return "\(label)删除失败"
+        }
+    }
+
     /// 获取处理状态颜色
     func getStatusColor(for video: Video) -> Color {
         switch video.analysisStatus {
@@ -978,6 +1004,20 @@ class VideoEditorViewModel {
     /// 取消当前导出
     func cancelCurrentExport() {
         ExportManager.shared.cancelExport()
+    }
+}
+
+private enum VideoDeletionError: LocalizedError {
+    case missingModelContext
+    case persistenceFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingModelContext:
+            return "删除失败：数据上下文未初始化。"
+        case .persistenceFailed(let message):
+            return "删除失败：数据库保存未完成。\(message)"
+        }
     }
 }
 

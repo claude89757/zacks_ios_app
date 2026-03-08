@@ -6,7 +6,7 @@
 //
 
 import Testing
-@testable import zacks_tennis
+@testable import Zacks网球视频剪辑
 
 struct zacks_tennisTests {
 

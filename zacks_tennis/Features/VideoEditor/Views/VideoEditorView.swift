@@ -113,7 +113,12 @@ struct VideoEditorView: View {
 
     private func deleteVideos(at offsets: IndexSet) {
         for index in offsets {
-            viewModel.deleteVideo(viewModel.videos[index])
+            do {
+                try viewModel.deleteVideo(viewModel.videos[index])
+            } catch {
+                viewModel.errorMessage = error.localizedDescription
+                viewModel.showError = true
+            }
         }
     }
 }
