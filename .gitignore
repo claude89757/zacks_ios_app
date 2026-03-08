@@ -85,3 +85,4 @@ Scripts/
 *.png
 !zacks_tennis/Assets.xcassets/**/*.png
 *.xcuserstate
+.worktrees/
