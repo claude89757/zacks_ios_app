@@ -105,7 +105,7 @@ actor SimpleHitDetector: AudioAnalyzing {
     // MARK: - Spectral Features (Internal)
 
     /// 频谱分析结果
-    private struct DetectedSpectralFeatures {
+    fileprivate struct DetectedSpectralFeatures {
         let dominantFrequency: Double
         let lowBandEnergy: Double       // 200-500Hz：球体共振
         let midBandEnergy: Double       // 500-2000Hz：弦-球交互
@@ -129,6 +129,12 @@ actor SimpleHitDetector: AudioAnalyzing {
 
     init(config: Config = .default) {
         self.config = config
+    }
+
+    deinit {
+        if let cached = cachedFFTSetup {
+            vDSP_destroy_fftsetup(cached.setup)
+        }
     }
 
     // MARK: - Cleanup
@@ -431,14 +437,22 @@ actor SimpleHitDetector: AudioAnalyzing {
             imagParts[i] = windowedSamples[2 * i + 1]
         }
 
-        var splitComplex = DSPSplitComplex(realp: &realParts, imagp: &imagParts)
-
-        // 执行实信号 FFT（vDSP_fft_zrip 比 vDSP_fft_zip 快约 2x）
-        vDSP_fft_zrip(fftSetup, &splitComplex, 1, log2n, FFTDirection(FFT_FORWARD))
-
-        // 计算幅度谱（功率谱）
         var magnitudes = [Float](repeating: 0, count: halfSize)
-        vDSP_zvmags(&splitComplex, 1, &magnitudes, 1, vDSP_Length(halfSize))
+        realParts.withUnsafeMutableBufferPointer { realBuffer in
+            imagParts.withUnsafeMutableBufferPointer { imagBuffer in
+                guard let realBase = realBuffer.baseAddress, let imagBase = imagBuffer.baseAddress else {
+                    return
+                }
+
+                var splitComplex = DSPSplitComplex(realp: realBase, imagp: imagBase)
+
+                // 执行实信号 FFT（vDSP_fft_zrip 比 vDSP_fft_zip 快约 2x）
+                vDSP_fft_zrip(fftSetup, &splitComplex, 1, log2n, FFTDirection(FFT_FORWARD))
+
+                // 计算幅度谱（功率谱）
+                vDSP_zvmags(&splitComplex, 1, &magnitudes, 1, vDSP_Length(halfSize))
+            }
+        }
 
         // 转换为幅度（开方）
         var powerSpectrum = [Float](repeating: 0, count: halfSize)
@@ -516,6 +530,10 @@ actor SimpleHitDetector: AudioAnalyzing {
 
     /// 计算攻击时间（从 10% 阈值到峰值的时间）
     private func calculateAttackTime(window: [Float], sampleRate: Double) -> Double {
+        Self.estimateAttackTime(window: window, sampleRate: sampleRate)
+    }
+
+    fileprivate static func estimateAttackTime(window: [Float], sampleRate: Double) -> Double {
         guard window.count > 10 else { return 1.0 }
 
         // 找到峰值样本
@@ -526,10 +544,11 @@ actor SimpleHitDetector: AudioAnalyzing {
         let peakIdx = Int(maxIdx)
         let threshold = maxVal * 0.1  // 10% 阈值
 
-        // 从峰值向后搜索 10% 阈值交叉点（限制搜索范围 ~2ms）
-        let searchLimit = max(0, peakIdx - min(100, peakIdx))
-        var attackStart = searchLimit
-        for i in stride(from: peakIdx, through: searchLimit, by: -1) {
+        // 允许向前回看约 20ms，避免把慢起音瞬态都误判成超快攻击。
+        let maxLookbackSamples = min(peakIdx, max(1, Int(sampleRate * 0.020)))
+        let searchStart = peakIdx - maxLookbackSamples
+        var attackStart = searchStart
+        for i in stride(from: peakIdx, through: searchStart, by: -1) {
             if abs(window[i]) < threshold {
                 attackStart = i
                 break
@@ -750,6 +769,12 @@ actor SimpleHitDetector: AudioAnalyzing {
     }
 }
 
+enum SimpleHitDetectorTestSupport {
+    static func estimateAttackTime(window: [Float], sampleRate: Double) -> Double {
+        SimpleHitDetector.estimateAttackTime(window: window, sampleRate: sampleRate)
+    }
+}
+
 // MARK: - Peak Candidate
 
 /// 峰值候选数据
@@ -793,9 +818,8 @@ private class SimpleDiagnosticCollector {
         switch stage {
         case "EPD":
             epdCount += 1
-        case "FreqValidation":
-            freqValidatedCount += 1
         case "Scoring":
+            freqValidatedCount += 1
             scoredCount += 1
             let peakData = createPeakData(from: candidate, passed: true, reason: nil, stage: stage)
             finalPeaks.append(peakData)
@@ -884,10 +908,10 @@ private class SimpleDiagnosticCollector {
         )
 
         let stats = FilteringStatistics(
-            totalCandidates: allCandidates.count,
+            totalCandidates: epdCount,
             passedAmplitudeThreshold: epdCount,
             passedDurationCheck: epdCount,
-            passedConfidenceThreshold: freqValidatedCount,
+            passedConfidenceThreshold: scoredCount,
             passedAdaptiveFiltering: scoredCount,
             afterPostProcessing: finalPeaks.count,
             finalCount: finalPeaks.count,
